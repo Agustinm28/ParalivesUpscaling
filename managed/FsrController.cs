@@ -1,13 +1,16 @@
 // ParalivesFSR - camera management (same scheme as the DLSS mod, ported to URP 17):
-//  * A hidden render camera copies the game camera every frame and renders the world, with the game's
-//    post-processing, into a low-resolution texture through a jittered projection. URP also renders depth and
-//    motion vectors (camera + per-object) for it.
+//  * A hidden render camera copies the game camera every frame and renders the world, without post-processing,
+//    into a low-resolution HDR texture through a jittered projection. URP also renders depth and motion vectors
+//    (camera + per-object) for it.
 //  * FsrPass, on that camera, copies depth + motion vectors and runs FSR into a full-resolution output.
-//  * While the game camera renders it draws no world; PresentPass copies the FSR output into it and the
-//    game's UI camera (stacked on top) then draws the UI at full resolution.
+//  * While the game camera renders it draws no world; PresentPass copies the FSR output into it, the game camera
+//    then runs the game's post-processing (bloom, vignette) at full resolution, and the stacked UI camera draws
+//    the UI on top.
 using System;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
+using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
@@ -24,8 +27,11 @@ namespace ParalivesFSR
         internal bool Active { get { return _active && !_suspended; } }
         internal Camera MainCamera { get { return _main; } }
         internal Camera RenderCamera { get { return _render; } }
+        internal bool MainHeld { get { return _mainHeld; } }
         internal RTHandle DepthHandle { get { return _hDepth; } }
         internal RTHandle MotionHandle { get { return _hMotion; } }
+        // Copy of the camera's depth attachment: unlike URP's depth texture it includes the characters.
+        internal RTHandle DepthAttachmentHandle { get { return _hDepthAtt; } }
         internal RTHandle PresentHandle { get { return _presentingFsr ? _hOutput : _hColor; } }
         internal bool FlipPresent { get { return O.PresentFlipY.Value; } }
         internal IntPtr FramePtr { get { return (IntPtr)_frame; } }
@@ -34,12 +40,14 @@ namespace ParalivesFSR
         private bool _active, _suspended, _disabledByError, _presentingFsr;
         private FsrMode _activeMode;
         private FsrVersion _activeVersion;
-        private bool _activeCancel;
+        private bool _activeCancel, _activeDebug;
         private Camera _main, _render;
         private UniversalAdditionalCameraData _mainData, _renderData;
-        private RenderTexture _color, _depth, _motion, _output;
-        private RTHandle _hColor, _hDepth, _hMotion, _hOutput;
-        private IntPtr _pColor, _pDepth, _pMotion, _pOutput;
+        private RenderTexture _color, _depth, _motion, _output, _depthAtt, _motionFix, _reactive;
+        private RTHandle _hColor, _hDepth, _hMotion, _hOutput, _hDepthAtt;
+        private IntPtr _pColor, _pDepth, _pMotion, _pOutput, _pDepthAtt, _pMotionFix, _pReactive;
+        private Matrix4x4 _prevViewProj;
+        private bool _havePrevViewProj;
         private int _inW, _inH, _outW, _outH;
         private int _jitterIndex, _jitterPhases, _resetFrames, _createGen, _preparedFrame = -1;
         private float _jx, _jy;
@@ -51,7 +59,7 @@ namespace ParalivesFSR
         private int _heldMask;
         private CameraClearFlags _heldClear;
         private Color _heldBg;
-        private bool _heldPost, _heldShadows;
+        private bool _heldShadows;
         private AntialiasingMode _heldAA;
 
         // URP asset render scale held while the render camera renders
@@ -109,6 +117,7 @@ namespace ParalivesFSR
         {
             // the game camera can never legitimately be held here; recover if URP skipped endCameraRendering
             ReleaseMain();
+            FsrOptions.Instance.Sync();
             if (EventFunc == IntPtr.Zero) return;
             try
             {
@@ -131,7 +140,7 @@ namespace ParalivesFSR
                 if (!_active && !Setup(target)) return;
 
                 if (O.Mode.Value != _activeMode || O.Version.Value != _activeVersion || O.JitterCancellation.Value != _activeCancel
-                    || Screen.width != _outW || Screen.height != _outH)
+                    || O.DebugView.Value != _activeDebug || Screen.width != _outW || Screen.height != _outH)
                     Rebuild();
 
                 _presentingFsr = Native.PFSR_GetStatus(Native.StState) == 2
@@ -141,14 +150,132 @@ namespace ParalivesFSR
                 {
                     _reportedVersion = Native.VersionName;
                     Plugin.Log.LogInfo("FSR running: " + _reportedVersion + ", " + _inW + "x" + _inH + " -> " + _outW + "x" + _outH + ".");
+                    LogInventory();
                 }
                 _render.depth = _main.depth - 1f;
+                if (_activeDebug && _presentingFsr && Time.unscaledTime >= _nextProbe)
+                {
+                    _nextProbe = Time.unscaledTime + 2f;
+                    ProbeInputs();
+                }
             }
             catch (Exception e)
             {
                 Plugin.Log.LogError("FSR error: " + e);
                 Fail("FSR error: " + e.Message);
             }
+        }
+
+        // DebugView only: logs what FSR actually receives (depth in metres, motion in render pixels).
+        private float _nextProbe;
+        private static readonly Vector2[] ProbePoints =
+            { new Vector2(0.5f, 0.5f), new Vector2(0.25f, 0.5f), new Vector2(0.75f, 0.5f), new Vector2(0.5f, 0.25f), new Vector2(0.5f, 0.75f) };
+
+        private void ProbeInputs()
+        {
+            ProbeDepth(_depth, "Depth texture (URP)");
+            ProbeDepth(_depthAtt, "Depth attachment (FSR input)");
+            ProbeMotion(_motion, "Motion URP");
+            ProbeMotion(_motionFix, "Motion recomputed (FSR input)");
+        }
+
+        private void ProbeMotion(RenderTexture rt, string label)
+        {
+            int w = _inW, h = _inH;
+            AsyncGPUReadback.Request(rt, 0, req =>
+            {
+                if (req.hasError) return;
+                var m = req.GetData<ushort>();  // RGHalf
+                if (m.Length != w * h * 2) return;
+                var sb = new StringBuilder(label + " probe (render pixels):");
+                foreach (var p in ProbePoints)
+                {
+                    int i = ((int)(p.y * (h - 1)) * w + (int)(p.x * (w - 1))) * 2;
+                    sb.Append(" (" + p.x + "," + p.y + ") " + (Mathf.HalfToFloat(m[i]) * w).ToString("0.00") + ", " + (Mathf.HalfToFloat(m[i + 1]) * h).ToString("0.00"));
+                }
+                Plugin.Log.LogInfo(sb.ToString());
+            });
+        }
+
+        // Once per session: the pipeline settings, post effects and renderer features FSR has to live with.
+        private static bool _inventoryLogged;
+        private static readonly FieldInfo RendererListField =
+            typeof(UniversalRenderPipelineAsset).GetField("m_RendererDataList", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private void LogInventory()
+        {
+            if (_inventoryLogged) return;
+            _inventoryLogged = true;
+            try
+            {
+                var a = UniversalRenderPipeline.asset;
+                if (a != null)
+                    Plugin.Log.LogInfo("Inventory: URP HDR " + a.supportsHDR + ", colorGrading " + a.colorGradingMode + ", renderScale " + a.renderScale +
+                                       ", upscalingFilter " + a.upscalingFilter + ", MSAA " + a.msaaSampleCount);
+                Plugin.Log.LogInfo("Inventory: game camera allowHDR " + _main.allowHDR + ", post " + _mainData.renderPostProcessing + ", AA " + _mainData.antialiasing +
+                                   ", volumeMask " + _mainData.volumeLayerMask.value);
+
+                foreach (var v in FindObjectsByType<Volume>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+                {
+                    var p = v.HasInstantiatedProfile() ? v.profile : v.sharedProfile;
+                    var sb = new StringBuilder("Inventory: volume '" + v.name + "' global " + v.isGlobal + ", layer " + v.gameObject.layer + ", weight " + v.weight + ", priority " + v.priority + ":");
+                    if (p != null)
+                        foreach (var c in p.components)
+                        {
+                            if (!c.active) continue;
+                            sb.Append(" " + c.GetType().Name + "[");
+                            foreach (var prm in c.parameters)
+                                if (prm.overrideState) sb.Append(prm.GetType().Name.Replace("Parameter", "") + "=" + prm + " ");
+                            sb.Append("]");
+                        }
+                    Plugin.Log.LogInfo(sb.ToString());
+                }
+
+                var list = RendererListField != null ? RendererListField.GetValue(a) as ScriptableRendererData[] : null;
+                if (list != null)
+                    for (int i = 0; i < list.Length; i++)
+                    {
+                        if (list[i] == null) continue;
+                        var sb = new StringBuilder("Inventory: renderer " + i + " '" + list[i].name + "' (" + list[i].GetType().Name + ") features:");
+                        foreach (var f in list[i].rendererFeatures)
+                            if (f != null) sb.Append(" " + f.name + "<" + f.GetType().FullName + ">" + (f.isActive ? "" : "(off)"));
+                        Plugin.Log.LogInfo(sb.ToString());
+                    }
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("Inventory failed: " + e.Message);
+            }
+        }
+
+        private void ProbeDepth(RenderTexture rt, string label)
+        {
+            int w = _inW, h = _inH;
+            float near = _main.nearClipPlane, far = _main.farClipPlane;
+            bool reversed = SystemInfo.usesReversedZBuffer;
+            AsyncGPUReadback.Request(rt, 0, req =>
+            {
+                if (req.hasError) return;
+                var d = req.GetData<float>();
+                if (d.Length != w * h) return;
+                float min = float.MaxValue, max = float.MinValue;
+                for (int i = 0; i < d.Length; i++) { min = Mathf.Min(min, d[i]); max = Mathf.Max(max, d[i]); }
+                var sb = new StringBuilder(label + " probe (near " + near + ", far " + far + ", reversed " + reversed + "): raw min " + min + ", max " + max + " |");
+                foreach (var p in ProbePoints)
+                {
+                    float raw = d[(int)(p.y * (h - 1)) * w + (int)(p.x * (w - 1))];
+                    sb.Append(" (" + p.x + "," + p.y + ") " + raw.ToString("0.000000") + " = " + EyeDepth(raw, near, far, reversed).ToString("0.00") + " m");
+                }
+                Plugin.Log.LogInfo(sb.ToString());
+            });
+        }
+
+        // Unity's LinearEyeDepth with _ZBufferParams.
+        private static float EyeDepth(float raw, float near, float far, bool reversed)
+        {
+            float x = reversed ? -1f + far / near : 1f - far / near;
+            float y = reversed ? 1f : far / near;
+            return 1f / (x / far * raw + y / far);
         }
 
         private static Camera FindGameCamera()
@@ -197,11 +324,47 @@ namespace ParalivesFSR
 
             _active = true;
             _lastPos = main.transform.position;
+            CreateAoOverride();
             Rebuild();
             go.SetActive(true);
             _render.enabled = true;
             Plugin.Log.LogInfo("FSR render path active (" + _activeMode + ").");
             return true;
+        }
+
+        // The game runs HBAO at half the camera resolution; while FSR upscales that is half of an already reduced
+        // resolution and contact shadows go soft. A global volume on a spare layer, which only the render camera
+        // includes while upscaling, switches HBAO to full resolution.
+        private Volume _aoVolume;
+
+        private void CreateAoOverride()
+        {
+            try
+            {
+                var hbaoType = AccessTools.TypeByName("HorizonBasedAmbientOcclusion.Universal.HBAO");
+                if (hbaoType == null) return;
+                int layer = -1;
+                for (int i = 31; i >= 8 && layer < 0; i--)
+                    if (string.IsNullOrEmpty(LayerMask.LayerToName(i))) layer = i;
+                if (layer < 0) { Plugin.Log.LogWarning("No spare layer for the AO override; contact shadows stay at the game's resolution."); return; }
+
+                var go = new GameObject("ParalivesFSR.AOVolume") { hideFlags = HideFlags.HideAndDontSave, layer = layer };
+                DontDestroyOnLoad(go);
+                _aoVolume = go.AddComponent<Volume>();
+                _aoVolume.isGlobal = true;
+                _aoVolume.priority = 1000f;
+                var profile = ScriptableObject.CreateInstance<VolumeProfile>();
+                var hbao = profile.Add(hbaoType);
+                var resolution = (VolumeParameter)hbaoType.GetField("resolution").GetValue(hbao);
+                resolution.overrideState = true;
+                resolution.GetType().GetProperty("value").SetValue(resolution, Enum.Parse(resolution.GetType().BaseType.GetGenericArguments()[0], "Full"));
+                _aoVolume.sharedProfile = profile;
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("AO override unavailable: " + e.Message);
+                _aoVolume = null;
+            }
         }
 
         private static float Ratio(FsrMode m)
@@ -221,6 +384,7 @@ namespace ParalivesFSR
             _activeMode = O.Mode.Value;
             _activeVersion = O.Version.Value;
             _activeCancel = O.JitterCancellation.Value;
+            _activeDebug = O.DebugView.Value;
             float ratio = Ratio(_activeMode);
             _outW = Screen.width;
             _outH = Screen.height;
@@ -238,16 +402,28 @@ namespace ParalivesFSR
             _hDepth = RTHandles.Alloc(_depth);
             _hMotion = RTHandles.Alloc(_motion);
             _hOutput = RTHandles.Alloc(_output);
+            _depthAtt = MakeRT(_inW, _inH, 0, RenderTextureFormat.RFloat, false, "ParalivesFSR.DepthAttachment");
+            _motionFix = MakeRT(_inW, _inH, 0, RenderTextureFormat.RGHalf, true, "ParalivesFSR.MotionFixed");
+            _reactive = MakeRT(_inW, _inH, 0, RenderTextureFormat.R8, true, "ParalivesFSR.Reactive");
+            _hDepthAtt = RTHandles.Alloc(_depthAtt);
             _pColor = _color.GetNativeTexturePtr();
             _pDepth = _depth.GetNativeTexturePtr();
             _pMotion = _motion.GetNativeTexturePtr();
             _pOutput = _output.GetNativeTexturePtr();
+            _pDepthAtt = _depthAtt.GetNativeTexturePtr();
+            _pMotionFix = _motionFix.GetNativeTexturePtr();
+            _pReactive = _reactive.GetNativeTexturePtr();
+            _havePrevViewProj = false;
 
             FrameData* f = NextSlot();
             _createGen++;
             FillCommon(f);
+            var asset = UniversalRenderPipeline.asset;
+            bool hdr = _main.allowHDR && asset != null && asset.supportsHDR;  // input is pre-post linear colour
             f->CreateFlags = (SystemInfo.usesReversedZBuffer ? Native.FlagDepthInverted : 0)
-                             | (_activeCancel ? Native.FlagJitterCancellation : 0);
+                             | (hdr ? Native.FlagHighDynamicRange : 0)
+                             | (_activeCancel ? Native.FlagJitterCancellation : 0)
+                             | (_activeDebug ? Native.FlagDebugVisualization : 0);
             IssueEvent(Native.EvCreate, (IntPtr)f);
 
             _resetFrames = 3;
@@ -274,6 +450,12 @@ namespace ParalivesFSR
             }
             catch { }
             try { IssueEvent(Native.EvDestroy, IntPtr.Zero); } catch { }
+            try
+            {
+                if (_aoVolume != null) { Destroy(_aoVolume.sharedProfile); Destroy(_aoVolume.gameObject); }
+            }
+            catch { }
+            _aoVolume = null;
             ReleaseTargets();
             _render = null; _renderData = null;
             _main = null; _mainData = null;
@@ -356,9 +538,10 @@ namespace ParalivesFSR
             _render.allowDynamicResolution = false;
 
             _renderData.renderType = CameraRenderType.Base;
-            _renderData.renderPostProcessing = _mainData.renderPostProcessing;
+            _renderData.renderPostProcessing = false;  // post runs on the game camera, after FSR, at output resolution
             _renderData.antialiasing = AntialiasingMode.None;
-            _renderData.volumeLayerMask = _mainData.volumeLayerMask;
+            _renderData.volumeLayerMask = _mainData.volumeLayerMask
+                                          | (_aoVolume != null && O.FullResolutionAO.Value && Ratio(_activeMode) > 1f ? 1 << _aoVolume.gameObject.layer : 0);
             _renderData.volumeTrigger = _mainData.volumeTrigger != null ? _mainData.volumeTrigger : _main.transform;
             _renderData.renderShadows = _mainData.renderShadows;
             _renderData.requiresDepthOption = CameraOverrideOption.On;
@@ -397,11 +580,18 @@ namespace ParalivesFSR
 
             // camera cuts -> history reset
             Vector3 pos = _main.transform.position;
-            if ((pos - _lastPos).sqrMagnitude > 25f) _resetFrames = 2;
+            if ((pos - _lastPos).sqrMagnitude > 25f) { _resetFrames = 2; _havePrevViewProj = false; }
             _lastPos = pos;
+
+            // reprojection matrices for the motion-vector repair: jittered, like the ones URP builds its vectors with
+            Matrix4x4 viewProj = GL.GetGPUProjectionMatrix(jittered, true) * _main.worldToCameraMatrix;
 
             FrameData* f = NextSlot();
             FillCommon(f);
+            f->InvViewProj = viewProj.inverse;
+            f->PrevViewProj = _havePrevViewProj ? _prevViewProj : viewProj;
+            _prevViewProj = viewProj;
+            _havePrevViewProj = true;
             f->Reset = _resetFrames > 0 ? 1 : 0;
             if (_resetFrames > 0) _resetFrames--;
             _frame = f;
@@ -413,7 +603,6 @@ namespace ParalivesFSR
             _heldMask = _main.cullingMask;
             _heldClear = _main.clearFlags;
             _heldBg = _main.backgroundColor;
-            _heldPost = _mainData.renderPostProcessing;
             _heldShadows = _mainData.renderShadows;
             _heldAA = _mainData.antialiasing;
             _mainHeld = true;
@@ -421,7 +610,6 @@ namespace ParalivesFSR
             _main.cullingMask = 0;
             _main.clearFlags = CameraClearFlags.SolidColor;
             _main.backgroundColor = Color.black;
-            _mainData.renderPostProcessing = false;
             _mainData.renderShadows = false;
             _mainData.antialiasing = AntialiasingMode.None;
         }
@@ -440,7 +628,6 @@ namespace ParalivesFSR
                 }
                 if (_mainData != null)
                 {
-                    _mainData.renderPostProcessing = _heldPost;
                     _mainData.renderShadows = _heldShadows;
                     _mainData.antialiasing = _heldAA;
                 }
@@ -476,6 +663,15 @@ namespace ParalivesFSR
             f->Sharpness = Mathf.Clamp01(O.Sharpness.Value);
             f->Version = (int)_activeVersion;
             f->Gen = _createGen;
+            f->DispatchFlags = _activeDebug ? Native.DispatchDrawDebugView : 0;
+            f->DepthAtt = _pDepthAtt;
+            f->MotionOut = _pMotionFix;
+            f->MvThreshold = 1e-5f;             // raw reversed-Z difference; background pixels match exactly
+            f->MvMode = _activeDebug ? 1 : 0;   // DebugView: recompute everywhere, so the probe can compare with URP's
+            f->InvViewProj = Matrix4x4.identity;
+            f->PrevViewProj = Matrix4x4.identity;
+            f->Reactive = _pReactive;
+            f->ReactiveStrength = Mathf.Clamp01(O.CharacterReactive.Value);
         }
 
         private FrameData* NextSlot()
@@ -519,16 +715,16 @@ namespace ParalivesFSR
 
         private void ReleaseTargets()
         {
-            foreach (var h in new[] { _hColor, _hDepth, _hMotion, _hOutput })
+            foreach (var h in new[] { _hColor, _hDepth, _hMotion, _hOutput, _hDepthAtt })
                 if (h != null) RTHandles.Release(h);
-            _hColor = _hDepth = _hMotion = _hOutput = null;
-            foreach (var rt in new[] { _color, _depth, _motion, _output })
+            _hColor = _hDepth = _hMotion = _hOutput = _hDepthAtt = null;
+            foreach (var rt in new[] { _color, _depth, _motion, _output, _depthAtt, _motionFix, _reactive })
             {
                 if (rt == null) continue;
                 try { rt.Release(); Destroy(rt); } catch { }
             }
-            _color = _depth = _motion = _output = null;
-            _pColor = _pDepth = _pMotion = _pOutput = IntPtr.Zero;
+            _color = _depth = _motion = _output = _depthAtt = _motionFix = _reactive = null;
+            _pColor = _pDepth = _pMotion = _pOutput = _pDepthAtt = _pMotionFix = _pReactive = IntPtr.Zero;
         }
 
         private static readonly FieldInfo RendererIndexField =

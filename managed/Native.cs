@@ -2,6 +2,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using UnityEngine;
 
 namespace ParalivesFSR
 {
@@ -16,7 +17,14 @@ namespace ParalivesFSR
         public float Sharpness;
         public int Reset;
         public int CreateFlags, Version;
-        public int Gen, Pad;
+        public int Gen, DispatchFlags;
+        public IntPtr DepthAtt, MotionOut;
+        public float MvThreshold;
+        public int MvMode;
+        public Matrix4x4 InvViewProj, PrevViewProj;
+        public IntPtr Reactive;
+        public float ReactiveStrength;
+        public int Pad;
     }
 
     internal static class Native
@@ -27,7 +35,9 @@ namespace ParalivesFSR
         internal const int StState = 0, StDispatches = 1, StDispatchesSinceCreate = 2, StCreatedGen = 3;
 
         // FfxApiCreateContextUpscaleFlags
-        internal const int FlagJitterCancellation = 1 << 2, FlagDepthInverted = 1 << 3;
+        internal const int FlagHighDynamicRange = 1 << 0, FlagJitterCancellation = 1 << 2, FlagDepthInverted = 1 << 3, FlagDebugVisualization = 1 << 9;
+        // FfxApiDispatchFsrUpscaleFlags
+        internal const int DispatchDrawDebugView = 1 << 0;
 
         [DllImport(Dll)] internal static extern IntPtr PFSR_GetRenderEventFunc();
         [DllImport(Dll)] internal static extern int PFSR_GetStatus(int which);

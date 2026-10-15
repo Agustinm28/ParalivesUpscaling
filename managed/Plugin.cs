@@ -44,9 +44,10 @@ namespace ParalivesFSR
     {
         public readonly ConfigEntry<FsrMode> Mode;
         public readonly ConfigEntry<FsrVersion> Version;
-        public readonly ConfigEntry<float> Sharpness;
+        public readonly ConfigEntry<float> Sharpness, CharacterReactive;
+        public readonly ConfigEntry<bool> FullResolutionAO;
         public readonly ConfigEntry<float> JitterSignX, JitterSignY, MotionSignX, MotionSignY;
-        public readonly ConfigEntry<bool> JitterCancellation, PresentFlipY;
+        public readonly ConfigEntry<bool> JitterCancellation, PresentFlipY, DebugView;
 
         public Settings(ConfigFile c)
         {
@@ -63,6 +64,12 @@ namespace ParalivesFSR
             JitterCancellation = c.Bind("Advanced", "JitterCancellation", true,
                 "URP's motion vectors are built with our jittered projection, so FSR must cancel the jitter. Try false if still images wobble.");
             PresentFlipY = c.Bind("Advanced", "PresentFlipY", false, "Only change if the 3D world shows upside down.");
+            FullResolutionAO = c.Bind("Advanced", "FullResolutionAO", true,
+                "While upscaling, compute the game's ambient occlusion at full render resolution instead of half (sharper contact shadows, a bit more GPU).");
+            CharacterReactive = c.Bind("Advanced", "CharacterReactive", 0.6f,
+                "FSR 3 only: how much FSR trusts the current frame on characters (0-1). Higher = less trailing on walking characters, slightly less smoothing.");
+            DebugView = c.Bind("Advanced", "DebugView", false,
+                "Show FSR's debug view (motion vectors, masks, history) instead of the image. Troubleshooting only; may not be supported by FSR 4.");
         }
     }
 }

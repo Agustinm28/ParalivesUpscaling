@@ -16,7 +16,8 @@ namespace ParalivesFSR
     {
         private sealed class PassData
         {
-            public TextureHandle Depth, Motion, DepthCopy, MotionCopy;
+            public TextureHandle Depth, Motion, DepthCopy, MotionCopy, DepthAtt, DepthAttCopy;
+            public bool CopyDepthAtt;
             public IntPtr Event, Frame;
         }
 
@@ -47,10 +48,20 @@ namespace ParalivesFSR
                 builder.UseTexture(res.backBufferColor);  // orders us after the final blit into it
                 builder.UseTexture(data.DepthCopy, AccessFlags.Write);
                 builder.UseTexture(data.MotionCopy, AccessFlags.Write);
+                // the real depth buffer: URP's depth texture comes from a prepass that misses the characters
+                data.CopyDepthAtt = c.DepthAttachmentHandle != null && res.cameraDepth.IsValid();
+                if (data.CopyDepthAtt)
+                {
+                    data.DepthAtt = res.cameraDepth;
+                    data.DepthAttCopy = renderGraph.ImportTexture(c.DepthAttachmentHandle);
+                    builder.UseTexture(data.DepthAtt);
+                    builder.UseTexture(data.DepthAttCopy, AccessFlags.Write);
+                }
                 builder.AllowPassCulling(false);
                 builder.SetRenderFunc((PassData p, UnsafeGraphContext ctx) =>
                 {
                     CommandBuffer cmd = CommandBufferHelpers.GetNativeCommandBuffer(ctx.cmd);
+                    if (p.CopyDepthAtt) Blitter.BlitCameraTexture(cmd, p.DepthAtt, p.DepthAttCopy);
                     Blitter.BlitCameraTexture(cmd, p.Depth, p.DepthCopy);
                     Blitter.BlitCameraTexture(cmd, p.Motion, p.MotionCopy);
                     cmd.IssuePluginEventAndData(p.Event, Native.EvDispatch, p.Frame);
@@ -60,8 +71,8 @@ namespace ParalivesFSR
     }
 
     /// <summary>
-    /// Game camera (drawing no world while FSR is on): replace its image right after opaques, so the opaque
-    /// texture, translucent UI panels and the stacked UI camera all see the FSR image.
+    /// Game camera (drawing no world while FSR is on): replace its image right after opaques, so its
+    /// post-processing, the opaque texture, translucent UI panels and the stacked UI camera all see the FSR image.
     /// </summary>
     internal sealed class PresentPass : ScriptableRenderPass
     {
