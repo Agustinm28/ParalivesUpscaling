@@ -16,6 +16,9 @@
     <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="Unity.RenderPipelines.Core.Runtime" HintPath="$(Managed)\Unity.RenderPipelines.Core.Runtime.dll" Private="false" />
     <Reference Include="Unity.RenderPipelines.Universal.Runtime" HintPath="$(Managed)\Unity.RenderPipelines.Universal.Runtime.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(Managed)\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(Managed)\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(Managed)\UnityEngine.UIModule.dll" Private="false" />
     <Reference Include="Paralives" HintPath="$(Managed)\Paralives.dll" Private="false" />
   </ItemGroup>
 </Project>

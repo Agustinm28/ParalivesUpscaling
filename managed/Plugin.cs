@@ -8,9 +8,12 @@ using UnityEngine;
 
 namespace ParalivesFSR
 {
-    public enum FsrMode { Off, NativeAA, Quality, Balanced, Performance, UltraPerformance }
+    // Quality preset (render-resolution scale).
+    public enum FsrMode { NativeAA, Quality, Balanced, Performance, UltraPerformance }
 
-    public enum FsrVersion { Auto = 0, FSR3 = 3, FSR4 = 4 }
+    // Upscaling technology; Off switches the mod off. The native side treats 10 as Intel XeSS (falling back to FSR if
+    // it cannot start) and FSR4 falls back to the newest FSR the driver offers.
+    public enum FsrVersion { Off = 0, FSR3 = 3, FSR4 = 4, XeSS = 10 }
 
     [BepInPlugin(Id, "Paralives FSR", Version)]
     [BepInProcess("Paralives.exe")]
@@ -45,17 +48,19 @@ namespace ParalivesFSR
         public readonly ConfigEntry<FsrMode> Mode;
         public readonly ConfigEntry<FsrVersion> Version;
         public readonly ConfigEntry<float> Sharpness, CharacterReactive;
-        public readonly ConfigEntry<bool> FullResolutionAO;
+        public readonly ConfigEntry<bool> FullResolutionAO, ShowInfo;
         public readonly ConfigEntry<float> JitterSignX, JitterSignY, MotionSignX, MotionSignY;
         public readonly ConfigEntry<bool> JitterCancellation, PresentFlipY, DebugView, PerfLog;
 
         public Settings(ConfigFile c)
         {
+            Version = c.Bind("General", "Version", FsrVersion.FSR4,
+                "Off, FSR3, FSR4 or XeSS. FSR4 needs a Radeon RX 9000 (or RX 7000 with recent drivers) and falls back to FSR 3 elsewhere. XeSS (best on Intel Arc, works on most DirectX 12 GPUs) falls back to FSR if it cannot start.");
             Mode = c.Bind("General", "Mode", FsrMode.Quality,
-                "Off, NativeAA (1.0x), Quality (1.5x), Balanced (1.7x), Performance (2.0x), UltraPerformance (3.0x).");
-            Version = c.Bind("General", "Version", FsrVersion.Auto,
-                "Auto uses the best version your GPU and driver support (FSR 4 on Radeon RX 9000, and RX 7000 with recent drivers; FSR 3 otherwise). FSR3 / FSR4 force one; FSR4 falls back to FSR 3 if unsupported.");
+                "NativeAA (1.0x), Quality (1.5x), Balanced (1.7x), Performance (2.0x), UltraPerformance (3.0x).");
             Sharpness = c.Bind("General", "Sharpness", 0.3f, "0 = off, 1 = maximum.");
+            ShowInfo = c.Bind("General", "ShowInfo", false,
+                "Show which upscaler is actually running (FSR 3, FSR 4 or XeSS) and its resolutions at the top of the screen.");
             // Calibration knobs: Unity's projection / motion-vector conventions vs FSR's. Flip one if the image misbehaves.
             JitterSignX = c.Bind("Advanced", "JitterSignX", -1f, "Try 1 if the image is soft or shimmers while standing still.");
             JitterSignY = c.Bind("Advanced", "JitterSignY", -1f, "Try 1 if the image is soft or shimmers while standing still.");

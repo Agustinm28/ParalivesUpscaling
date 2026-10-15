@@ -8,9 +8,11 @@
 //    the UI on top.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -76,9 +78,54 @@ namespace ParalivesFSR
         // =====================================================================================
         // Unity lifecycle
         // =====================================================================================
+        // Crash guard: a marker is written before FSR starts and removed once it has run for a while. If the game
+        // dies in between, the next start switches FSR off instead of crash-looping.
+        private static string MarkerPath
+        {
+            get { return Path.Combine(Path.Combine(Paths.CachePath, "ParalivesFSR"), "starting.marker"); }
+        }
+
+        private bool _markerSet;
+
+        private void SetMarker()
+        {
+            if (_markerSet) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(MarkerPath));
+                File.WriteAllText(MarkerPath, DateTime.Now.ToString("o"));
+                _markerSet = true;
+            }
+            catch { }
+        }
+
+        private void ClearMarker()
+        {
+            if (!_markerSet) return;
+            _markerSet = false;
+            try { if (File.Exists(MarkerPath)) File.Delete(MarkerPath); } catch { }
+        }
+
+        private void OnApplicationQuit()
+        {
+            ClearMarker();
+        }
+
         private void Awake()
         {
             Instance = this;
+            try
+            {
+                if (File.Exists(MarkerPath))
+                {
+                    File.Delete(MarkerPath);
+                    O.Version.Value = FsrVersion.Off;
+                    Plugin.Log.LogError("The game closed while FSR was starting last time, so FSR has been switched off. " +
+                                        "You can switch it back on in Options > Video > Upscaler. If it happens again, please report it with " +
+                                        "BepInEx\\LogOutput.log and Paralives_Data\\Plugins\\x86_64\\ParalivesFSR.log.");
+                }
+            }
+            catch { }
             _slots = (FrameData*)Marshal.AllocHGlobal(sizeof(FrameData) * Slots);
             _frame = _slots;
             *_frame = default(FrameData);
@@ -92,7 +139,9 @@ namespace ParalivesFSR
                 Plugin.Log.LogError("ParalivesFSR.dll could not be loaded (it belongs in Paralives_Data\\Plugins\\x86_64): " + e.Message);
                 enabled = false;
             }
+            // picking something in the menu again retries after a failure
             O.Mode.SettingChanged += (s, e) => { _disabledByError = false; };
+            O.Version.SettingChanged += (s, e) => { _disabledByError = false; };
         }
 
         private void OnEnable()
@@ -134,7 +183,7 @@ namespace ParalivesFSR
                     else if (state == -2 && Native.PFSR_GetStatus(Native.StCreatedGen) == _createGen) Fail("FSR stopped: " + Native.LastError);
                 }
 
-                Camera target = (O.Mode.Value != FsrMode.Off && !_disabledByError) ? FindGameCamera() : null;
+                Camera target = (O.Version.Value != FsrVersion.Off && !_disabledByError) ? FindGameCamera() : null;
                 bool usable = target != null && target.isActiveAndEnabled && target.targetTexture == null
                               && Screen.width >= 64 && Screen.height >= 64;
                 if (!usable)
@@ -152,6 +201,7 @@ namespace ParalivesFSR
                 _presentingFsr = Native.PFSR_GetStatus(Native.StState) == 2
                                  && Native.PFSR_GetStatus(Native.StCreatedGen) == _createGen
                                  && Native.PFSR_GetStatus(Native.StDispatchesSinceCreate) > 1;
+                if (_markerSet && _presentingFsr && Native.PFSR_GetStatus(Native.StDispatchesSinceCreate) > 60) ClearMarker();
                 if (_presentingFsr && _reportedVersion == null)
                 {
                     _reportedVersion = Native.VersionName;
@@ -347,6 +397,34 @@ namespace ParalivesFSR
             return 1f / (x / far * raw + y / far);
         }
 
+        // ShowInfo: what is actually running (as reported by the native side, so fallbacks show), top-centre.
+        private GUIStyle _infoStyle;
+
+        private void OnGUI()
+        {
+            if (!O.ShowInfo.Value || Event.current.type != EventType.Repaint) return;
+            string text;
+            if (O.Version.Value == FsrVersion.Off) text = Localization.Translate("ParalivesFSR_Version_Off");
+            else if (_presentingFsr)
+            {
+                string name = Native.VersionName;
+                if (!name.StartsWith("XeSS", StringComparison.Ordinal)) name = "FSR " + name;
+                text = name + " · " + Localization.Translate("ParalivesFSR_Mode_" + _activeMode) + " · " +
+                       _inW + "x" + _inH + " → " + _outW + "x" + _outH;
+            }
+            else if (_active) text = Localization.Translate("ParalivesFSR_Status_Starting");
+            else text = Localization.Translate("ParalivesFSR_Status_Unavailable");
+
+            if (_infoStyle == null) _infoStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.UpperCenter };
+            _infoStyle.fontSize = Mathf.Max(12, Screen.height / 60);
+            var rect = new Rect(0f, Screen.height * 0.01f, Screen.width, _infoStyle.fontSize * 2f);
+            var shadow = new Rect(rect.x + 1.5f, rect.y + 1.5f, rect.width, rect.height);
+            _infoStyle.normal.textColor = new Color(0f, 0f, 0f, 0.8f);
+            GUI.Label(shadow, text, _infoStyle);
+            _infoStyle.normal.textColor = Color.white;
+            GUI.Label(rect, text, _infoStyle);
+        }
+
         private static Camera FindGameCamera()
         {
             try
@@ -489,6 +567,7 @@ namespace ParalivesFSR
             FillCommon(f);
             var asset = UniversalRenderPipeline.asset;
             bool hdr = _main.allowHDR && asset != null && asset.supportsHDR;  // input is pre-post linear colour
+            SetMarker();
             f->CreateFlags = (SystemInfo.usesReversedZBuffer ? Native.FlagDepthInverted : 0)
                              | (hdr ? Native.FlagHighDynamicRange : 0)
                              | (_activeCancel ? Native.FlagJitterCancellation : 0)
@@ -504,6 +583,7 @@ namespace ParalivesFSR
 
         private void Teardown()
         {
+            ClearMarker();
             _active = false;
             ReleaseMain();
             ReleaseScale();
@@ -528,13 +608,13 @@ namespace ParalivesFSR
             ReleaseTargets();
             _render = null; _renderData = null;
             _main = null; _mainData = null;
-            _activeMode = FsrMode.Off;
             _presentingFsr = false;
             Plugin.Log.LogInfo("FSR render path off; game camera restored.");
         }
 
         private void Fail(string why)
         {
+            ClearMarker();  // a clean, reported failure is not a crash
             Plugin.Log.LogError(why);
             _disabledByError = true;
             if (_active) Teardown();

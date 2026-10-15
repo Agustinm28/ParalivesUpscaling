@@ -46,6 +46,21 @@ namespace ParalivesFSR
         internal static string VersionName { get { return Text(0); } }
         internal static string LastError { get { return Text(1); } }
 
+        // Versions this GPU/driver offers ("" until the runtime is up, or if not offered); cached once known.
+        private static string _fsr3, _fsr4, _xess;
+        internal static string Fsr3Name { get { return Offered(ref _fsr3, 2); } }
+        internal static string Fsr4Name { get { return Offered(ref _fsr4, 3); } }
+        internal static string XessName { get { return Offered(ref _xess, 4); } }
+
+        private static string Offered(ref string cache, int which)
+        {
+            if (string.IsNullOrEmpty(cache))
+            {
+                try { cache = Text(which); } catch { cache = ""; }  // DLL missing: no names
+            }
+            return cache;
+        }
+
         private static string Text(int which)
         {
             var sb = new StringBuilder(512);
