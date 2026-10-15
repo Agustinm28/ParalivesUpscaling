@@ -237,6 +237,9 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 
 ## Credits and licenses
 
+Paralives Upscaling's own code is released under the [MIT License](LICENSE). The third-party components it bundles keep
+their own licenses (in `licenses\` in the release zip):
+
 - AMD FidelityFX SDK (FSR 3.1 / FSR 4): © Advanced Micro Devices, MIT license. The `amd_fidelityfx_*.dll` files are
   AMD's signed binaries from SDK v2.3.0.
 - Intel XeSS SDK: © Intel Corporation, Intel Simplified Software License (`native/xess/LICENSE.txt`). `libxess.dll` is
