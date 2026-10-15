@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <GamePath>D:\SteamLibrary\steamapps\common\Paralives</GamePath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(GamePath)\BepInEx\core\BepInEx.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(GamePath)\Paralives_Data\Managed\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(GamePath)\Paralives_Data\Managed\UnityEngine.CoreModule.dll" Private="false" />
+  </ItemGroup>
+</Project>
