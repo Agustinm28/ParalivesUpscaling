@@ -21,6 +21,7 @@
 #include "ffx/api/include/ffx_api_types.h"
 #include "ffx/api/include/dx12/ffx_api_dx12.h"
 #include "ffx/upscalers/include/ffx_upscale.h"
+#include "xess/inc/xess_d3d12.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -35,7 +36,7 @@ struct FrameData {
     float FrameTimeMs, Near, Far, FovY;
     float Sharpness;
     int Reset;
-    int CreateFlags, Version;  // Version: 0 = driver/SDK default, 3 = force FSR 3.x, 4 = force FSR 4.x
+    int CreateFlags, Version;  // Version: 0 = driver/SDK default, 3 = force FSR 3.x, 4 = force FSR 4.x, 10 = Intel XeSS
     int Gen, DispatchFlags;    // DispatchFlags: FfxApiDispatchFsrUpscaleFlags
     // Motion-vector repair: Depth = URP depth texture (prepass), DepthAtt = camera depth attachment,
     // Motion = URP motion vectors, MotionOut = repaired vectors handed to FSR.
@@ -54,6 +55,7 @@ enum { StState = 0, StDispatches, StDispatchesSinceCreate, StCreatedGen, StDispa
 
 static volatile LONG s_status[StCount];
 static char s_versionName[128], s_lastError[512];
+static char s_fsr3Name[32], s_fsr4Name[32], s_xessName[32];  // what this GPU/driver offers, for the menu
 
 // ---- logging ----
 static wchar_t s_dir[MAX_PATH];
@@ -90,8 +92,21 @@ static PfnFfxQuery pQuery;
 static PfnFfxDispatch pDispatch;
 static ffxContext s_ctx;
 
+// ---- Intel XeSS (second backend; libxess.dll next to this DLL, loaded on first use) ----
+static const int kVersionXess = 10;
+static HMODULE s_xessLib;
+static bool s_xessTried;
+static decltype(&xessD3D12CreateContext) pXCreate;
+static decltype(&xessD3D12BuildPipelines) pXBuild;
+static decltype(&xessD3D12Init) pXInit;
+static decltype(&xessD3D12Execute) pXExecute;
+static decltype(&xessDestroyContext) pXDestroy;
+static decltype(&xessSetVelocityScale) pXVelocityScale;
+static decltype(&xessGetVersion) pXVersion;
+static xess_context_handle_t s_xctx;  // set instead of s_ctx while XeSS is the active upscaler
+
 // Contexts replaced while the GPU may still use them; destroyed once the frame fence passes.
-struct Retired { ffxContext ctx; UINT64 fence; };
+struct Retired { ffxContext ctx; xess_context_handle_t xctx; UINT64 fence; };
 static Retired s_retired[8];
 
 // ---- our command list (ring of allocators, one per frame in flight) ----
@@ -256,24 +271,96 @@ static void WaitFence(UINT64 v)
     if (WaitForSingleObject(s_fenceEvent, 2000) == WAIT_TIMEOUT) Log("warning: frame fence %llu wait timed out", v);
 }
 
+static void DestroyNow(ffxContext &ctx, xess_context_handle_t &xctx)
+{
+    if (ctx) { pDestroy(&ctx, nullptr); ctx = nullptr; }
+    if (xctx) { pXDestroy(xctx); xctx = nullptr; }
+}
+
 static void CollectRetired(bool force)
 {
     for (Retired &r : s_retired) {
-        if (!r.ctx || (!force && !FenceDone(r.fence))) continue;
+        if ((!r.ctx && !r.xctx) || (!force && !FenceDone(r.fence))) continue;
         if (force) WaitFence(r.fence);
-        pDestroy(&r.ctx, nullptr);
-        r.ctx = nullptr;
+        DestroyNow(r.ctx, r.xctx);
     }
 }
 
 static void RetireCurrent()
 {
-    if (!s_ctx) return;
+    if (!s_ctx && !s_xctx) return;
     for (Retired &r : s_retired)
-        if (!r.ctx) { r.ctx = s_ctx; r.fence = s_lastFence; s_ctx = nullptr; return; }
+        if (!r.ctx && !r.xctx) {
+            r.ctx = s_ctx; r.xctx = s_xctx; r.fence = s_lastFence;
+            s_ctx = nullptr; s_xctx = nullptr;
+            return;
+        }
     WaitFence(s_lastFence);  // all slots busy: just wait
-    pDestroy(&s_ctx, nullptr);
-    s_ctx = nullptr;
+    DestroyNow(s_ctx, s_xctx);
+}
+
+static bool LoadXess()
+{
+    if (s_xessTried) return s_xessLib != nullptr;
+    s_xessTried = true;
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"%slibxess.dll", s_dir);
+    s_xessLib = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!s_xessLib) { Log("XeSS: libxess.dll not found next to ParalivesFSR.dll (%lu)", GetLastError()); return false; }
+    pXCreate = (decltype(pXCreate))GetProcAddress(s_xessLib, "xessD3D12CreateContext");
+    pXBuild = (decltype(pXBuild))GetProcAddress(s_xessLib, "xessD3D12BuildPipelines");
+    pXInit = (decltype(pXInit))GetProcAddress(s_xessLib, "xessD3D12Init");
+    pXExecute = (decltype(pXExecute))GetProcAddress(s_xessLib, "xessD3D12Execute");
+    pXDestroy = (decltype(pXDestroy))GetProcAddress(s_xessLib, "xessDestroyContext");
+    pXVelocityScale = (decltype(pXVelocityScale))GetProcAddress(s_xessLib, "xessSetVelocityScale");
+    pXVersion = (decltype(pXVersion))GetProcAddress(s_xessLib, "xessGetVersion");
+    if (!pXCreate || !pXBuild || !pXInit || !pXExecute || !pXDestroy || !pXVelocityScale || !pXVersion) {
+        Log("XeSS: libxess.dll is missing exports");
+        FreeLibrary(s_xessLib);
+        s_xessLib = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Same inputs and conventions as FSR (pixel motion vectors, current -> previous; jitter in [-0.5, 0.5]).
+// Our scale ratios match XeSS's own presets, so the preset only tells XeSS what to expect.
+static bool CreateXess(const FrameData *f)
+{
+    if (!LoadXess()) return false;
+    xess_context_handle_t h = nullptr;
+    xess_result_t r = pXCreate(s_dev, &h);
+    if (r != XESS_RESULT_SUCCESS || !h) { Log("XeSS: context creation failed (%d)", (int)r); return false; }
+
+    uint32_t flags = 0;
+    if (f->CreateFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) flags |= XESS_INIT_FLAG_INVERTED_DEPTH;
+    if (f->CreateFlags & FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION) flags |= XESS_INIT_FLAG_JITTERED_MV;
+    if (!(f->CreateFlags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE)) flags |= XESS_INIT_FLAG_LDR_INPUT_COLOR;
+    if (s_mvPso) flags |= XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK;
+
+    float ratio = (float)f->OutW / (float)f->RenderW;
+    xess_quality_settings_t q = ratio < 1.05f ? XESS_QUALITY_SETTING_AA
+                              : ratio < 1.6f  ? XESS_QUALITY_SETTING_ULTRA_QUALITY
+                              : ratio < 1.85f ? XESS_QUALITY_SETTING_QUALITY
+                              : ratio < 2.5f  ? XESS_QUALITY_SETTING_BALANCED
+                                              : XESS_QUALITY_SETTING_ULTRA_PERFORMANCE;
+
+    // ponytail: blocking kernel build = a one-off hitch when XeSS is switched on; pass a pipeline library if it matters
+    r = pXBuild(h, nullptr, true, flags);
+    if (r != XESS_RESULT_SUCCESS) Log("XeSS: pipeline build returned %d", (int)r);
+    xess_d3d12_init_params_t ip = {};
+    ip.outputResolution = { (uint32_t)f->OutW, (uint32_t)f->OutH };
+    ip.qualitySetting = q;
+    ip.initFlags = flags;
+    r = pXInit(h, &ip);
+    if (r != XESS_RESULT_SUCCESS) { Log("XeSS: init failed (%d)", (int)r); pXDestroy(h); return false; }
+
+    s_xctx = h;
+    xess_version_t v = {};
+    pXVersion(&v);
+    snprintf(s_versionName, sizeof s_versionName, "XeSS %u.%u.%u", v.major, v.minor, v.patch);
+    Log("context created: %s, %dx%d -> %dx%d, preset %d, flags 0x%X", s_versionName, f->RenderW, f->RenderH, f->OutW, f->OutH, (int)q, flags);
+    return true;
 }
 
 // Returns the version id whose display name starts with the wanted major version, or 0 (= default).
@@ -296,6 +383,8 @@ static uint64_t PickVersion(int major)
         Log("available upscaler: %s (id 0x%llX)", n, ids[i]);
         const char *d = n; while (*d && (*d < '0' || *d > '9')) d++;  // first digit = major version
         if (!pick && major && *d == '0' + major) pick = ids[i];
+        if (*d == '3' && !s_fsr3Name[0]) snprintf(s_fsr3Name, sizeof s_fsr3Name, "%s", d);
+        if (*d == '4' && !s_fsr4Name[0]) snprintf(s_fsr4Name, sizeof s_fsr4Name, "%s", d);
     }
     if (major && !pick) Log("FSR %d not available on this GPU/driver; using the default", major);
     return pick;
@@ -309,6 +398,15 @@ static void DoCreate(const FrameData *f)
     InterlockedExchange(&s_status[StCreatedGen], f->Gen);
     InterlockedExchange(&s_status[StDispatchesSinceCreate], 0);
 
+    if (f->Version == kVersionXess) {
+        if (CreateXess(f)) {
+            InterlockedExchange(&s_status[StDispatchFailures], 0);
+            InterlockedExchange(&s_status[StState], 2);
+            return;
+        }
+        Log("XeSS unavailable; falling back to FSR");
+    }
+
     ffxCreateBackendDX12Desc backend = {};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
     backend.device = s_dev;
@@ -317,7 +415,7 @@ static void DoCreate(const FrameData *f)
     apiVersion.version = FFX_UPSCALER_VERSION;
     ffxOverrideVersion over = {};
     over.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-    over.versionId = PickVersion(f->Version);
+    over.versionId = PickVersion(f->Version == kVersionXess ? 0 : f->Version);
 
     ffxCreateContextDescUpscale desc = {};
     desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
@@ -341,9 +439,11 @@ static void DoCreate(const FrameData *f)
     InterlockedExchange(&s_status[StState], 2);
 }
 
+static bool DispatchFsr(const FrameData *f, bool fix, float reactive, unsigned &code);
+
 static void DoDispatch(const FrameData *f)
 {
-    if (s_status[StState] != 2 || !s_ctx || f->Gen != s_status[StCreatedGen]) return;
+    if (s_status[StState] != 2 || (!s_ctx && !s_xctx) || f->Gen != s_status[StCreatedGen]) return;
     CollectRetired(false);
 
     int i = s_allocIdx = (s_allocIdx + 1) % kFrames;
@@ -352,10 +452,61 @@ static void DoDispatch(const FrameData *f)
     s_list->Reset(s_alloc[i], nullptr);
 
     bool fix = s_mvPso && f->DepthAtt && f->MotionOut && f->Reactive;
-    // FSR 4 copes with the characters' missing object motion on its own; the mask would only cost it stability
-    float reactive = s_versionName[0] == '3' ? f->ReactiveStrength : 0.0f;
+    // FSR 3 only: FSR 4 copes with the characters' missing object motion on its own, and XeSS reads the mask so
+    // strongly that masked characters lose all history and look pixelated
+    float reactive = (!s_xctx && s_versionName[0] == '3') ? f->ReactiveStrength : 0.0f;
     if (fix) RecordMotionFix(f, i, reactive);
 
+    bool ok;
+    unsigned code;
+    if (s_xctx) {
+        pXVelocityScale(s_xctx, f->MvScaleX, f->MvScaleY);
+        xess_d3d12_execute_params_t p = {};
+        p.pColorTexture = f->Color;
+        p.pVelocityTexture = fix ? f->MotionOut : f->Motion;
+        p.pDepthTexture = fix ? f->DepthAtt : f->Depth;
+        p.pResponsivePixelMaskTexture = fix ? f->Reactive : nullptr;
+        p.pOutputTexture = f->Output;
+        p.jitterOffsetX = f->JitterX;
+        p.jitterOffsetY = f->JitterY;
+        p.exposureScale = 1.0f;
+        p.resetHistory = f->Reset ? 1u : 0u;
+        p.inputWidth = (uint32_t)f->RenderW;
+        p.inputHeight = (uint32_t)f->RenderH;
+        xess_result_t r = pXExecute(s_xctx, s_list, &p);
+        ok = r == XESS_RESULT_SUCCESS;
+        code = (unsigned)r;
+    } else {
+        ok = DispatchFsr(f, fix, reactive, code);
+    }
+    s_list->Close();
+    if (!ok) {
+        LONG n = InterlockedIncrement(&s_status[StDispatchFailures]);
+        if (n <= 3) Log("dispatch failed (%d)", (int)code);
+        if (n >= 10) Fail(-2, "%s keeps failing (%d)", s_xctx ? "XeSS" : "FSR", (int)code);
+        return;
+    }
+
+    const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    UnityGraphicsD3D12ResourceState states[7] = {
+        { f->Color, read, read },
+        { f->Depth, read, read },
+        { f->Motion, read, read },
+        { f->Output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS },
+        { f->DepthAtt, read, read },
+        { f->MotionOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read },  // RecordMotionFix moves these two UAV -> read
+        { f->Reactive, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read },
+    };
+    s_lastFence = s_allocFence[i] = s_d3d->ExecuteCommandList(s_list, fix ? 7 : 4, states);
+    if (s_status[StDispatches] == 0) Log("first dispatch ok");
+    InterlockedIncrement(&s_status[StDispatches]);
+    InterlockedIncrement(&s_status[StDispatchesSinceCreate]);
+    InterlockedExchange(&s_status[StDispatchFailures], 0);
+}
+
+// Records the FSR dispatch into s_list.
+static bool DispatchFsr(const FrameData *f, bool fix, float reactive, unsigned &code)
+{
     ffxDispatchDescUpscale d = {};
     d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
     d.commandList = s_list;
@@ -380,29 +531,8 @@ static void DoDispatch(const FrameData *f)
     d.flags = (uint32_t)f->DispatchFlags;
 
     ffxReturnCode_t r = pDispatch(&s_ctx, &d.header);
-    s_list->Close();
-    if (r != FFX_API_RETURN_OK) {
-        LONG n = InterlockedIncrement(&s_status[StDispatchFailures]);
-        if (n <= 3) Log("dispatch failed (%u)", r);
-        if (n >= 10) Fail(-2, "FSR keeps failing (%u)", r);
-        return;
-    }
-
-    const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    UnityGraphicsD3D12ResourceState states[7] = {
-        { f->Color, read, read },
-        { f->Depth, read, read },
-        { f->Motion, read, read },
-        { f->Output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS },
-        { f->DepthAtt, read, read },
-        { f->MotionOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read },  // RecordMotionFix moves these two UAV -> read
-        { f->Reactive, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, read },
-    };
-    s_lastFence = s_allocFence[i] = s_d3d->ExecuteCommandList(s_list, fix ? 7 : 4, states);
-    if (s_status[StDispatches] == 0) Log("first dispatch ok");
-    InterlockedIncrement(&s_status[StDispatches]);
-    InterlockedIncrement(&s_status[StDispatchesSinceCreate]);
-    InterlockedExchange(&s_status[StDispatchFailures], 0);
+    code = r;
+    return r == FFX_API_RETURN_OK;
 }
 
 static void DoDestroy()
@@ -463,7 +593,12 @@ static void InitDevice()
 
     if (!InitMotionFix()) Log("motion fix unavailable; FSR gets URP's depth texture and motion vectors as they are");
     if (!LoadFfx()) return;
-    PickVersion(0);  // log what this GPU/driver offers
+    PickVersion(0);  // log what this GPU/driver offers (and remember the FSR 3 / 4 names for the menu)
+    if (LoadXess()) {
+        xess_version_t v = {};
+        if (pXVersion(&v) == XESS_RESULT_SUCCESS) snprintf(s_xessName, sizeof s_xessName, "%u.%u.%u", v.major, v.minor, v.patch);
+        Log("available upscaler: XeSS %s", s_xessName);
+    }
     Log("ready (device %p)", (void *)s_dev);
     InterlockedExchange(&s_status[StState], 1);
 }
@@ -511,10 +646,11 @@ EXPORT void UNITY_INTERFACE_API UnityPluginUnload()
 // ---- exports for C# ----
 EXPORT void *UNITY_INTERFACE_API PFSR_GetRenderEventFunc() { return (void *)OnRenderEvent; }
 EXPORT int UNITY_INTERFACE_API PFSR_GetStatus(int which) { return which >= 0 && which < StCount ? (int)s_status[which] : 0; }
-// which: 0 = active upscaler version name, 1 = last error
+// which: 0 = active upscaler version name, 1 = last error, 2/3 = FSR 3/4 version offered, 4 = XeSS version
 EXPORT int UNITY_INTERFACE_API PFSR_GetText(int which, char *buf, int cap)
 {
     if (!buf || cap <= 0) return 0;
-    snprintf(buf, (size_t)cap, "%s", which == 0 ? s_versionName : s_lastError);
+    const char *texts[] = { s_versionName, s_lastError, s_fsr3Name, s_fsr4Name, s_xessName };
+    snprintf(buf, (size_t)cap, "%s", which >= 0 && which < 5 ? texts[which] : "");
     return (int)strlen(buf);
 }
