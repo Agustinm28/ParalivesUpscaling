@@ -1,8 +1,8 @@
-# Paralives Upscaling (FSR / XeSS)
+# Paralives Upscaling (FSR / XeSS / DLSS)
 
-Native AMD FSR 3.1 / FSR 4 and Intel XeSS upscaling and anti-aliasing for **Paralives**, as a BepInEx mod.
+Native AMD FSR 3.1 / FSR 4, Intel XeSS and NVIDIA DLSS upscaling and anti-aliasing for **Paralives**, as a BepInEx mod.
 
-No OptiScaler, no DLL proxies: the mod drives the official AMD FidelityFX SDK and Intel XeSS SDK directly on the
+No OptiScaler, no DLL proxies: the mod drives the official AMD FidelityFX, Intel XeSS and NVIDIA DLSS SDKs directly on the
 game's own DirectX 12 device, and integrates with the game's render pipeline (Unity 6, URP) so the upscaler gets proper
 depth and motion vectors.
 
@@ -10,6 +10,7 @@ depth and motion vectors.
 
 - **FSR 4** (machine-learning upscaler) and **FSR 3.1**, picked automatically or forced from the options menu.
 - **Intel XeSS** (XMX path on Intel Arc, DP4a path on most other DirectX 12 GPUs), with automatic fallback to FSR.
+- **NVIDIA DLSS** on NVIDIA RTX cards (greyed out in the menu on other GPUs), with automatic fallback to FSR.
 - **Native AA** mode: FSR as anti-aliasing at full resolution, a sharper and more stable replacement for MSAA/SMAA.
 - Upscaling modes from Quality (1.5x) to Ultra Performance (3.0x).
 - Settings live in the game's own **Options > Video** menu and apply instantly, without restarting.
@@ -29,14 +30,52 @@ depth and motion vectors.
 | FSR 3.1 | Any DirectX 12 GPU (AMD, NVIDIA, Intel) |
 | FSR 4 | AMD Radeon RX 9000 series; RX 7000 series with a recent driver |
 | Intel XeSS | Best on Intel Arc; works on most DirectX 12 GPUs with Shader Model 6.4 (DP4a) |
+| NVIDIA DLSS | NVIDIA GeForce RTX (20 series or newer) with a recent driver |
 
 The mod only works on DirectX 12, not on DirectX 11 (the game's default). On tested hardware the game runs as fast or
 faster on DirectX 12.
 
 ## Installation
 
+The release zip contains:
+
+| | |
+|---|---|
+| `Install.bat`, `setup.ps1` | The installer |
+| `files\` | The mod, laid out like the game folder |
+| `licenses\` | AMD FidelityFX, Intel XeSS and NVIDIA DLSS SDK licenses |
+| `README.md` | This file |
+
+### Easy install (recommended)
+
+1. **Extract the zip** (right-click > Extract All). Do not run `Install.bat` from inside the zip: Windows would only copy
+   the installer, without the mod files.
+2. Close Paralives if it is running, then run **`Install.bat`** from the extracted folder.
+3. The installer looks for the Paralives folder (next to the installer, then in your Steam libraries) and **asks you to
+   confirm it**:
+
+   ```
+   Paralives folder: D:\SteamLibrary\steamapps\common\Paralives
+   Is this the right folder? [Y]es / [C]hange / [Q]uit
+   ```
+
+   **Change** opens a folder picker (the folder must contain `Paralives.exe`); **Quit** exits without changing anything.
+   Nothing is installed or removed until you confirm the folder.
+4. If **BepInEx** is not installed, the installer downloads **BepInEx 5.4.23.5 x64** from BepInEx's official GitHub
+   release and checks it against the official SHA-256 before extracting it; if the file does not match, nothing is
+   installed. Then it copies the mod.
+5. In Steam: right-click Paralives > Properties > General > Launch Options, and add `-force-d3d12`. The installer copies
+   it to the clipboard, so you only need to paste it.
+6. Start the game and pick a technology and a quality in **Options > Video**.
+
+**Updating or removing:** run `Install.bat` again. If the mod is already installed it offers **[U]pdate / reinstall**,
+**[R]emove** or **[C]ancel**. Remove deletes only the mod's files (and, if you say so, its settings); BepInEx stays,
+since other mods may use it. If you no longer need it, you can also remove `-force-d3d12` from the launch options.
+
+### Manual installation
+
 1. Install BepInEx 5 x64 into the Paralives folder (the one with `Paralives.exe`) and start the game once.
-2. Copy the mod files:
+2. Copy the contents of the zip's `files` folder into the Paralives folder, which puts these files in place:
 
    | File | Destination |
    |---|---|
@@ -45,11 +84,13 @@ faster on DirectX 12.
    | `amd_fidelityfx_loader_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_upscaler_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `libxess.dll` | `Paralives_Data\Plugins\x86_64\` |
+   | `nvngx_dlss.dll` | `Paralives_Data\Plugins\x86_64\` |
 
-3. In Steam: Paralives > Properties > Launch options: `-force-d3d12`.
-4. Start the game and pick a mode in **Options > Video > Upscaling (FSR / XeSS)**.
+3. In Steam: Paralives > Properties > General > Launch Options: `-force-d3d12`.
+4. Start the game and pick a technology and a quality in **Options > Video**.
 
-To uninstall, delete those five files (and `BepInEx\config\paralives.upscaling.cfg` if you want to reset the settings).
+To uninstall manually, delete those six files, the `BepInEx\plugins\ParalivesUpscaling` folder and, to reset the
+settings, `BepInEx\config\paralives.upscaling.cfg`.
 
 ## Usage
 
@@ -57,13 +98,12 @@ In **Options > Video**:
 
 | Option | Values |
 |---|---|
-| **Upscaling (FSR / XeSS)** | Off, FSR 3, FSR 4, Intel XeSS. The entries show the exact versions your driver offers (e.g. FSR 3.1.5, FSR 4.1.1, XeSS 2.0.2). FSR 4 falls back to FSR 3, XeSS to FSR, if unsupported. |
+| **Upscaling Technology** | Off, FSR 3, FSR 4, Intel XeSS, NVIDIA DLSS. The entries show the exact versions your driver offers (e.g. FSR 3.1.5, FSR 4.1.1, XeSS 2.0.2, DLSS 310.9.1). DLSS is greyed out (and cannot be picked) without an NVIDIA RTX card. FSR 4 falls back to FSR 3, XeSS and DLSS to FSR, if they cannot start. |
 | **Upscaling Quality** | Native AA, Quality, Balanced, Performance, Ultra Performance |
 | **FSR Sharpness** | 0 (off) to 1 (FSR only) |
 | **Show upscaler info on screen** | Shows at the top of the screen what is actually running, e.g. `XeSS 2.0.2 · Quality · 1707x960 → 2560x1440` (fallbacks included). |
 
-The same modes and render resolutions apply to XeSS (its Native AA, Ultra Quality, Quality, Balanced and Ultra
-Performance presets). Switching to XeSS the first time takes a moment while it compiles its shaders.
+The same modes and render resolutions apply to XeSS and DLSS (DLAA for Native AA). Switching to XeSS the first time takes a moment while it compiles its shaders.
 
 The options follow the game's language (English, Spanish, Brazilian Portuguese, French, German, Italian, Polish,
 Simplified Chinese). Without DirectX 12 they are shown greyed out, with a note explaining how to enable it.
@@ -108,6 +148,10 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
 
 ## Known limitations
 
+- **DLSS has not been tested by me**: the mod was developed on an AMD card, so DLSS has not been tried on NVIDIA
+  hardware yet. It uses the official DLSS SDK and the same inputs as FSR and XeSS; if something looks wrong with it,
+  please report it with both logs.
+
 - **Walking characters with FSR 3 / XeSS**: the game's character shaders produce no per-object motion vectors, so FSR 3
   and XeSS can show slight flicker on characters while they walk. For FSR 3 the mod softens it with a reactive mask;
   FSR 4 handles it well.
@@ -144,6 +188,7 @@ Logs:
 | Upscaling switched itself off after a crash | Crash guard: the game closed while the upscaler was starting, so the next start turned it off. Turn it back on in the menu; if it happens again, send both logs. |
 | "ParalivesUpscaling.dll could not be loaded" | The native DLL is missing from `Paralives_Data\Plugins\x86_64`. |
 | FSR4 picked but log says 3.1.x | Your GPU/driver does not offer FSR 4; update the driver. |
+| DLSS greyed out | No NVIDIA RTX card (or the driver is too old). `ParalivesUpscaling.log` says why ("DLSS: not available ..."). |
 | XeSS picked but log says FSR | XeSS could not start ("XeSS unavailable; falling back to FSR" in `ParalivesUpscaling.log`, with the reason). |
 
 ## How it works
@@ -153,7 +198,7 @@ Logs:
 2. A render-graph pass copies URP's depth texture, the real depth buffer and URP's motion vectors.
 3. On the render thread, the native plugin records a small compute pass that rebuilds the motion vectors where URP's
    depth prepass missed geometry (the characters) and writes a reactive mask there, then runs FSR (FidelityFX API) or
-   XeSS into a full-resolution texture. The command list goes to Unity with
+   XeSS or DLSS into a full-resolution texture. The command list goes to Unity with
    `IUnityGraphicsD3D12v6::ExecuteCommandList` plus the resource states FSR expects, so Unity handles the barriers.
 4. The game camera draws no world; a pass copies the FSR output into it, the game's post-processing runs on top at
    full resolution, and the UI camera draws the UI.
@@ -164,12 +209,17 @@ post-processing) and save thumbnails working.
 ## Building from source
 
 Requirements: Visual Studio 2022 or newer with the C++ desktop workload and a Windows 10/11 SDK, the .NET SDK, and the
-game with BepInEx installed (the C# project references the game's and BepInEx's assemblies).
+game installed (the C# project references the game's Unity and Paralives assemblies; BepInEx's reference assemblies are
+in `managed/lib`).
 
 ```powershell
 .\install.ps1                                   # builds both parts and copies them into the game
 .\install.ps1 -Game "E:\Games\Paralives"        # other install location
+.\package.ps1                                   # builds the release zip: dist\paralives_upscaling-<version>.zip
 ```
+
+The release zip contains `Install.bat` + `setup.ps1` (from `installer/`), the mod under `files\` laid out like the game
+folder, this README and the SDK licenses under `licenses\`.
 
 `native\build.bat` and `dotnet build managed\ParalivesUpscaling.csproj -c Release` build each part on its own. If the game is
 not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `managed\ParalivesUpscaling.csproj`.
@@ -180,7 +230,9 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 | `native/` | Native D3D12 plugin (C++): FidelityFX calls, motion-vector repair pass |
 | `native/ffx/` | AMD FidelityFX SDK v2.3.0 headers and signed runtime DLLs |
 | `native/xess/` | Intel XeSS SDK 3.0.2 headers and signed runtime DLL (its super-resolution library reports version 2.0.2) |
+| `native/dlss/` | NVIDIA DLSS SDK 310.9.1 headers, static NGX library and signed runtime DLL |
 | `native/Unity/` | Unity native plugin API headers |
+| `installer/` | End-user installer: `Install.bat` + `setup.ps1` (installs BepInEx if needed, installs / updates / removes the mod) |
 | `PLProbe/` | Test harness used to verify Unity's D3D12 plugin interface in this game |
 
 ## Credits and licenses
@@ -189,7 +241,11 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
   AMD's signed binaries from SDK v2.3.0.
 - Intel XeSS SDK: © Intel Corporation, Intel Simplified Software License (`native/xess/LICENSE.txt`). `libxess.dll` is
   Intel's signed binary from SDK 3.0.2.
+- NVIDIA DLSS SDK: © NVIDIA Corporation, NVIDIA DLSS SDK license (`native/dlss/LICENSE.txt`). `nvngx_dlss.dll` is
+  NVIDIA's signed binary from SDK 310.9.1.
 - Unity native plugin API headers: © Unity Technologies, Unity Companion License.
+- BepInEx 5.4.23.5 (`managed/lib`, reference only; the installer downloads the official release): LGPL-2.1.
 - Camera scheme inspired by the ParalivesDLSS mod (Nexus Mods #400).
 - AMD, Radeon and FidelityFX are trademarks of Advanced Micro Devices; Intel, Arc and XeSS are trademarks of Intel
-  Corporation. This is an unofficial fan mod, not made or endorsed by AMD, Intel or Paralives Studio.
+  Corporation; NVIDIA, GeForce, RTX and DLSS are trademarks of NVIDIA Corporation. This is an unofficial fan mod, not
+  made or endorsed by AMD, Intel, NVIDIA or Paralives Studio.
