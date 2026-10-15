@@ -22,9 +22,14 @@
 #include "ffx/api/include/dx12/ffx_api_dx12.h"
 #include "ffx/upscalers/include/ffx_upscale.h"
 #include "xess/inc/xess_d3d12.h"
+#include "dlss/include/nvsdk_ngx_helpers_d3d.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "version.lib")
+#pragma comment(lib, "dlss/lib/nvsdk_ngx_s.lib")
+#pragma comment(lib, "advapi32.lib")  // used by the NGX static lib
+#pragma comment(lib, "user32.lib")
 
 #define EXPORT extern "C" UNITY_INTERFACE_EXPORT
 
@@ -36,7 +41,7 @@ struct FrameData {
     float FrameTimeMs, Near, Far, FovY;
     float Sharpness;
     int Reset;
-    int CreateFlags, Version;  // Version: 0 = driver/SDK default, 3 = force FSR 3.x, 4 = force FSR 4.x, 10 = Intel XeSS
+    int CreateFlags, Version;  // Version: 0 = driver/SDK default, 3 = FSR 3.x, 4 = FSR 4.x, 10 = Intel XeSS, 20 = NVIDIA DLSS
     int Gen, DispatchFlags;    // DispatchFlags: FfxApiDispatchFsrUpscaleFlags
     // Motion-vector repair: Depth = URP depth texture (prepass), DepthAtt = camera depth attachment,
     // Motion = URP motion vectors, MotionOut = repaired vectors handed to FSR.
@@ -55,7 +60,7 @@ enum { StState = 0, StDispatches, StDispatchesSinceCreate, StCreatedGen, StDispa
 
 static volatile LONG s_status[StCount];
 static char s_versionName[128], s_lastError[512];
-static char s_fsr3Name[32], s_fsr4Name[32], s_xessName[32];  // what this GPU/driver offers, for the menu
+static char s_fsr3Name[32], s_fsr4Name[32], s_xessName[32], s_dlssName[32];  // what this GPU/driver offers, for the menu
 
 // ---- logging ----
 static wchar_t s_dir[MAX_PATH];
@@ -105,8 +110,14 @@ static decltype(&xessSetVelocityScale) pXVelocityScale;
 static decltype(&xessGetVersion) pXVersion;
 static xess_context_handle_t s_xctx;  // set instead of s_ctx while XeSS is the active upscaler
 
+// ---- NVIDIA DLSS (third backend; NGX core ships with the NVIDIA driver, nvngx_dlss.dll sits next to this DLL) ----
+static const int kVersionDlss = 20;
+static bool s_ngxReady;                   // NGX initialised and DLSS available on this GPU/driver
+static NVSDK_NGX_Parameter *s_ngxParams;
+static NVSDK_NGX_Handle *s_dlss;          // set instead of s_ctx while DLSS is the active upscaler
+
 // Contexts replaced while the GPU may still use them; destroyed once the frame fence passes.
-struct Retired { ffxContext ctx; xess_context_handle_t xctx; UINT64 fence; };
+struct Retired { ffxContext ctx; xess_context_handle_t xctx; NVSDK_NGX_Handle *dlss; UINT64 fence; };
 static Retired s_retired[8];
 
 // ---- our command list (ring of allocators, one per frame in flight) ----
@@ -271,32 +282,110 @@ static void WaitFence(UINT64 v)
     if (WaitForSingleObject(s_fenceEvent, 2000) == WAIT_TIMEOUT) Log("warning: frame fence %llu wait timed out", v);
 }
 
-static void DestroyNow(ffxContext &ctx, xess_context_handle_t &xctx)
+static void DestroyNow(ffxContext &ctx, xess_context_handle_t &xctx, NVSDK_NGX_Handle *&dlss)
 {
     if (ctx) { pDestroy(&ctx, nullptr); ctx = nullptr; }
     if (xctx) { pXDestroy(xctx); xctx = nullptr; }
+    if (dlss) { NVSDK_NGX_D3D12_ReleaseFeature(dlss); dlss = nullptr; }
 }
 
 static void CollectRetired(bool force)
 {
     for (Retired &r : s_retired) {
-        if ((!r.ctx && !r.xctx) || (!force && !FenceDone(r.fence))) continue;
+        if ((!r.ctx && !r.xctx && !r.dlss) || (!force && !FenceDone(r.fence))) continue;
         if (force) WaitFence(r.fence);
-        DestroyNow(r.ctx, r.xctx);
+        DestroyNow(r.ctx, r.xctx, r.dlss);
     }
 }
 
 static void RetireCurrent()
 {
-    if (!s_ctx && !s_xctx) return;
+    if (!s_ctx && !s_xctx && !s_dlss) return;
     for (Retired &r : s_retired)
-        if (!r.ctx && !r.xctx) {
-            r.ctx = s_ctx; r.xctx = s_xctx; r.fence = s_lastFence;
-            s_ctx = nullptr; s_xctx = nullptr;
+        if (!r.ctx && !r.xctx && !r.dlss) {
+            r.ctx = s_ctx; r.xctx = s_xctx; r.dlss = s_dlss; r.fence = s_lastFence;
+            s_ctx = nullptr; s_xctx = nullptr; s_dlss = nullptr;
             return;
         }
     WaitFence(s_lastFence);  // all slots busy: just wait
-    DestroyNow(s_ctx, s_xctx);
+    DestroyNow(s_ctx, s_xctx, s_dlss);
+}
+
+// NGX needs an NVIDIA RTX GPU and driver; anywhere else this just reports DLSS as unavailable.
+static void InitDlss()
+{
+    const wchar_t *paths[] = { s_dir };
+    NVSDK_NGX_FeatureCommonInfo info = {};
+    info.PathListInfo.Path = paths;
+    info.PathListInfo.Length = 1;
+    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init_with_ProjectID("5f3b2c9e-7a41-4d8b-9c6e-2a1f0e8d7b34", NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0",
+                                                             s_dir, s_dev, &info, NVSDK_NGX_Version_API);
+    if (NVSDK_NGX_FAILED(r)) { Log("DLSS: not available (NGX init 0x%08X; needs an NVIDIA RTX GPU)", (unsigned)r); return; }
+
+    NVSDK_NGX_Parameter *caps = nullptr;
+    int available = 0, needsDriver = 0;
+    if (NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_GetCapabilityParameters(&caps)) && caps) {
+        NVSDK_NGX_Parameter_GetI(caps, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
+        NVSDK_NGX_Parameter_GetI(caps, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needsDriver);
+        NVSDK_NGX_D3D12_DestroyParameters(caps);
+    }
+    if (!available || NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&s_ngxParams))) {
+        Log("DLSS: not available on this GPU/driver (available %d, needs newer driver %d)", available, needsDriver);
+        s_ngxParams = nullptr;
+        NVSDK_NGX_D3D12_Shutdown1(s_dev);
+        return;
+    }
+    s_ngxReady = true;
+
+    // the DLSS version is the one of the nvngx_dlss.dll we ship
+    wchar_t dll[MAX_PATH];
+    swprintf(dll, MAX_PATH, L"%snvngx_dlss.dll", s_dir);
+    DWORD size = GetFileVersionInfoSizeW(dll, nullptr);
+    BYTE buf[4096];
+    VS_FIXEDFILEINFO *fi = nullptr; UINT len = 0;
+    if (size && size <= sizeof buf && GetFileVersionInfoW(dll, 0, sizeof buf, buf) && VerQueryValueW(buf, L"\\", (void **)&fi, &len) && fi)
+        snprintf(s_dlssName, sizeof s_dlssName, "%u.%u.%u", HIWORD(fi->dwFileVersionMS), LOWORD(fi->dwFileVersionMS), HIWORD(fi->dwFileVersionLS));
+    else
+        snprintf(s_dlssName, sizeof s_dlssName, "%s", "SR");
+    Log("available upscaler: DLSS %s", s_dlssName);
+}
+
+// Our scale ratios match DLSS's presets (DLAA 1.0, Quality 1.5, Balanced 1.72, Performance 2.0, Ultra Performance 3.0).
+static bool CreateDlss(const FrameData *f)
+{
+    if (!s_ngxReady) return false;
+    float ratio = (float)f->OutW / (float)f->RenderW;
+    NVSDK_NGX_DLSS_Create_Params cp = {};
+    cp.Feature.InWidth = (unsigned)f->RenderW;
+    cp.Feature.InHeight = (unsigned)f->RenderH;
+    cp.Feature.InTargetWidth = (unsigned)f->OutW;
+    cp.Feature.InTargetHeight = (unsigned)f->OutH;
+    cp.Feature.InPerfQualityValue = ratio < 1.05f ? NVSDK_NGX_PerfQuality_Value_DLAA
+                                  : ratio < 1.6f  ? NVSDK_NGX_PerfQuality_Value_MaxQuality
+                                  : ratio < 1.85f ? NVSDK_NGX_PerfQuality_Value_Balanced
+                                  : ratio < 2.5f  ? NVSDK_NGX_PerfQuality_Value_MaxPerf
+                                                  : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+    cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+    if (f->CreateFlags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
+    if (f->CreateFlags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+    if (f->CreateFlags & FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
+
+    // feature creation records commands: use our own list, like a dispatch
+    int i = s_allocIdx = (s_allocIdx + 1) % kFrames;
+    WaitFence(s_allocFence[i]);
+    s_alloc[i]->Reset();
+    s_list->Reset(s_alloc[i], nullptr);
+    NVSDK_NGX_Handle *h = nullptr;
+    NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(s_list, 1, 1, &h, s_ngxParams, &cp);
+    s_list->Close();
+    if (NVSDK_NGX_FAILED(r) || !h) { Log("DLSS: feature creation failed (0x%08X)", (unsigned)r); return false; }
+    s_lastFence = s_allocFence[i] = s_d3d->ExecuteCommandList(s_list, 0, nullptr);
+
+    s_dlss = h;
+    snprintf(s_versionName, sizeof s_versionName, "DLSS %s", s_dlssName);
+    Log("context created: %s, %dx%d -> %dx%d, quality %d, flags 0x%X", s_versionName, f->RenderW, f->RenderH, f->OutW, f->OutH,
+        (int)cp.Feature.InPerfQualityValue, cp.InFeatureCreateFlags);
+    return true;
 }
 
 static bool LoadXess()
@@ -406,6 +495,14 @@ static void DoCreate(const FrameData *f)
         }
         Log("XeSS unavailable; falling back to FSR");
     }
+    if (f->Version == kVersionDlss) {
+        if (CreateDlss(f)) {
+            InterlockedExchange(&s_status[StDispatchFailures], 0);
+            InterlockedExchange(&s_status[StState], 2);
+            return;
+        }
+        Log("DLSS unavailable; falling back to FSR");
+    }
 
     ffxCreateBackendDX12Desc backend = {};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -415,7 +512,7 @@ static void DoCreate(const FrameData *f)
     apiVersion.version = FFX_UPSCALER_VERSION;
     ffxOverrideVersion over = {};
     over.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-    over.versionId = PickVersion(f->Version == kVersionXess ? 0 : f->Version);
+    over.versionId = PickVersion(f->Version == 3 || f->Version == 4 ? f->Version : 0);
 
     ffxCreateContextDescUpscale desc = {};
     desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
@@ -443,7 +540,7 @@ static bool DispatchFsr(const FrameData *f, bool fix, float reactive, unsigned &
 
 static void DoDispatch(const FrameData *f)
 {
-    if (s_status[StState] != 2 || (!s_ctx && !s_xctx) || f->Gen != s_status[StCreatedGen]) return;
+    if (s_status[StState] != 2 || (!s_ctx && !s_xctx && !s_dlss) || f->Gen != s_status[StCreatedGen]) return;
     CollectRetired(false);
 
     int i = s_allocIdx = (s_allocIdx + 1) % kFrames;
@@ -454,7 +551,7 @@ static void DoDispatch(const FrameData *f)
     bool fix = s_mvPso && f->DepthAtt && f->MotionOut && f->Reactive;
     // FSR 3 only: FSR 4 copes with the characters' missing object motion on its own, and XeSS reads the mask so
     // strongly that masked characters lose all history and look pixelated
-    float reactive = (!s_xctx && s_versionName[0] == '3') ? f->ReactiveStrength : 0.0f;
+    float reactive = (s_ctx && s_versionName[0] == '3') ? f->ReactiveStrength : 0.0f;
     if (fix) RecordMotionFix(f, i, reactive);
 
     bool ok;
@@ -476,6 +573,24 @@ static void DoDispatch(const FrameData *f)
         xess_result_t r = pXExecute(s_xctx, s_list, &p);
         ok = r == XESS_RESULT_SUCCESS;
         code = (unsigned)r;
+    } else if (s_dlss) {
+        NVSDK_NGX_D3D12_DLSS_Eval_Params e = {};
+        e.Feature.pInColor = f->Color;
+        e.Feature.pInOutput = f->Output;
+        e.pInDepth = fix ? f->DepthAtt : f->Depth;
+        e.pInMotionVectors = fix ? f->MotionOut : f->Motion;
+        e.InJitterOffsetX = f->JitterX;
+        e.InJitterOffsetY = f->JitterY;
+        e.InRenderSubrectDimensions = { (unsigned)f->RenderW, (unsigned)f->RenderH };
+        e.InReset = f->Reset;
+        e.InMVScaleX = f->MvScaleX;
+        e.InMVScaleY = f->MvScaleY;
+        e.InPreExposure = 1.0f;
+        e.InExposureScale = 1.0f;
+        e.InFrameTimeDeltaInMsec = f->FrameTimeMs;
+        NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(s_list, s_dlss, s_ngxParams, &e);
+        ok = NVSDK_NGX_SUCCEED(r);
+        code = (unsigned)r;
     } else {
         ok = DispatchFsr(f, fix, reactive, code);
     }
@@ -483,7 +598,7 @@ static void DoDispatch(const FrameData *f)
     if (!ok) {
         LONG n = InterlockedIncrement(&s_status[StDispatchFailures]);
         if (n <= 3) Log("dispatch failed (%d)", (int)code);
-        if (n >= 10) Fail(-2, "%s keeps failing (%d)", s_xctx ? "XeSS" : "FSR", (int)code);
+        if (n >= 10) Fail(-2, "%s keeps failing (%d)", s_xctx ? "XeSS" : s_dlss ? "DLSS" : "FSR", (int)code);
         return;
     }
 
@@ -599,6 +714,7 @@ static void InitDevice()
         if (pXVersion(&v) == XESS_RESULT_SUCCESS) snprintf(s_xessName, sizeof s_xessName, "%u.%u.%u", v.major, v.minor, v.patch);
         Log("available upscaler: XeSS %s", s_xessName);
     }
+    InitDlss();
     Log("ready (device %p)", (void *)s_dev);
     InterlockedExchange(&s_status[StState], 1);
 }
@@ -608,6 +724,11 @@ static void ShutdownDevice()
     if (pDestroy) {
         RetireCurrent();
         CollectRetired(true);
+    }
+    if (s_ngxReady) {
+        if (s_ngxParams) { NVSDK_NGX_D3D12_DestroyParameters(s_ngxParams); s_ngxParams = nullptr; }
+        NVSDK_NGX_D3D12_Shutdown1(s_dev);
+        s_ngxReady = false;
     }
     if (s_mvPso) { s_mvPso->Release(); s_mvPso = nullptr; }
     if (s_mvRootSig) { s_mvRootSig->Release(); s_mvRootSig = nullptr; }
@@ -646,11 +767,12 @@ EXPORT void UNITY_INTERFACE_API UnityPluginUnload()
 // ---- exports for C# ----
 EXPORT void *UNITY_INTERFACE_API PFSR_GetRenderEventFunc() { return (void *)OnRenderEvent; }
 EXPORT int UNITY_INTERFACE_API PFSR_GetStatus(int which) { return which >= 0 && which < StCount ? (int)s_status[which] : 0; }
-// which: 0 = active upscaler version name, 1 = last error, 2/3 = FSR 3/4 version offered, 4 = XeSS version
+// which: 0 = active upscaler version name, 1 = last error, 2/3 = FSR 3/4 version offered, 4 = XeSS version,
+// 5 = DLSS version ("" when this GPU/driver cannot run DLSS)
 EXPORT int UNITY_INTERFACE_API PFSR_GetText(int which, char *buf, int cap)
 {
     if (!buf || cap <= 0) return 0;
-    const char *texts[] = { s_versionName, s_lastError, s_fsr3Name, s_fsr4Name, s_xessName };
-    snprintf(buf, (size_t)cap, "%s", which >= 0 && which < 5 ? texts[which] : "");
+    const char *texts[] = { s_versionName, s_lastError, s_fsr3Name, s_fsr4Name, s_xessName, s_dlssName };
+    snprintf(buf, (size_t)cap, "%s", which >= 0 && which < 6 ? texts[which] : "");
     return (int)strlen(buf);
 }
