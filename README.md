@@ -1,4 +1,4 @@
-# ParalivesFSR
+# Paralives Upscaling (FSR / XeSS)
 
 Native AMD FSR 3.1 / FSR 4 and Intel XeSS upscaling and anti-aliasing for **Paralives**, as a BepInEx mod.
 
@@ -40,8 +40,8 @@ faster on DirectX 12.
 
    | File | Destination |
    |---|---|
-   | `ParalivesFSR.dll` (managed) | `BepInEx\plugins\ParalivesFSR\` |
-   | `ParalivesFSR.dll` (native) | `Paralives_Data\Plugins\x86_64\` |
+   | `ParalivesUpscaling.dll` (managed) | `BepInEx\plugins\ParalivesUpscaling\` |
+   | `ParalivesUpscaling.dll` (native) | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_loader_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_upscaler_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `libxess.dll` | `Paralives_Data\Plugins\x86_64\` |
@@ -49,7 +49,7 @@ faster on DirectX 12.
 3. In Steam: Paralives > Properties > Launch options: `-force-d3d12`.
 4. Start the game and pick a mode in **Options > Video > Upscaling (FSR / XeSS)**.
 
-To uninstall, delete those five files (and `BepInEx\config\paralives.fsr.cfg` if you want to reset the settings).
+To uninstall, delete those five files (and `BepInEx\config\paralives.upscaling.cfg` if you want to reset the settings).
 
 ## Usage
 
@@ -76,7 +76,7 @@ Simplified Chinese). Without DirectX 12 they are shown greyed out, with a note e
 | Performance | 2.0x | 1280x720 |
 | UltraPerformance | 3.0x | 853x480 |
 
-Changes apply immediately. The selection is saved in `BepInEx\config\paralives.fsr.cfg`.
+Changes apply immediately. The selection is saved in `BepInEx\config\paralives.upscaling.cfg`.
 
 ## Will it raise my FPS?
 
@@ -119,7 +119,7 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
 
 ## Advanced settings
 
-`BepInEx\config\paralives.fsr.cfg`, section `[Advanced]` (restart the game after editing):
+`BepInEx\config\paralives.upscaling.cfg`, section `[Advanced]` (restart the game after editing):
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -135,16 +135,16 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
 
 Logs:
 
-- `BepInEx\LogOutput.log`: managed side ("FSR running: 4.1.1, 1707x960 -> 2560x1440." when it works).
-- `Paralives_Data\Plugins\x86_64\ParalivesFSR.log`: native side (available FSR versions, context creation, errors).
+- `BepInEx\LogOutput.log`: managed side ("Upscaler running: 4.1.1, 1707x960 -> 2560x1440." when it works).
+- `Paralives_Data\Plugins\x86_64\ParalivesUpscaling.log`: native side (available FSR versions, context creation, errors).
 
 | Symptom | Cause / fix |
 |---|---|
 | FSR options greyed out | The game is on DirectX 11: add `-force-d3d12`. |
-| FSR switched itself off after a crash | Crash guard: the game closed while FSR was starting, so the next start turned it off. Turn it back on in the menu; if it happens again, send both logs. |
-| "ParalivesFSR.dll could not be loaded" | The native DLL is missing from `Paralives_Data\Plugins\x86_64`. |
+| Upscaling switched itself off after a crash | Crash guard: the game closed while the upscaler was starting, so the next start turned it off. Turn it back on in the menu; if it happens again, send both logs. |
+| "ParalivesUpscaling.dll could not be loaded" | The native DLL is missing from `Paralives_Data\Plugins\x86_64`. |
 | FSR4 picked but log says 3.1.x | Your GPU/driver does not offer FSR 4; update the driver. |
-| XeSS picked but log says FSR | XeSS could not start ("XeSS unavailable; falling back to FSR" in `ParalivesFSR.log`, with the reason). |
+| XeSS picked but log says FSR | XeSS could not start ("XeSS unavailable; falling back to FSR" in `ParalivesUpscaling.log`, with the reason). |
 
 ## How it works
 
@@ -171,8 +171,8 @@ game with BepInEx installed (the C# project references the game's and BepInEx's 
 .\install.ps1 -Game "E:\Games\Paralives"        # other install location
 ```
 
-`native\build.bat` and `dotnet build managed\ParalivesFSR.csproj -c Release` build each part on its own. If the game is
-not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `managed\ParalivesFSR.csproj`.
+`native\build.bat` and `dotnet build managed\ParalivesUpscaling.csproj -c Release` build each part on its own. If the game is
+not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `managed\ParalivesUpscaling.csproj`.
 
 | Folder | Contents |
 |---|---|
