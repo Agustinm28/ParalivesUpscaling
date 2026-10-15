@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+!native/ffx/bin/
+native/out/
+*.obj
+*.exp
+*.lib
+!native/ffx/bin/*.lib
+PLProbe/native/PLProbe.dll
+.agents/
