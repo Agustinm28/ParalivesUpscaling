@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
-    <AssemblyName>ParalivesFSR</AssemblyName>
+    <AssemblyName>ParalivesUpscaling</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>9.0</LangVersion>
     <GamePath>D:\SteamLibrary\steamapps\common\Paralives</GamePath>

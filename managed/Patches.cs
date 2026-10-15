@@ -1,11 +1,11 @@
-// ParalivesFSR - game hooks.
+// ParalivesUpscaling - game hooks.
 using System;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
     /// <summary>
     /// Grass/flowers are queued (Graphics.DrawMeshInstanced) for the game camera only, which draws no world while

@@ -1,4 +1,4 @@
-// ParalivesFSR - Settings > Video integration.
+// ParalivesUpscaling - Settings > Video integration.
 //
 // The options menu (UIOptions) hands each category's Setting objects to the game's UIInspector, which draws native
 // dropdowns / sliders for their public fields by reflection. We add one plain object to the Video category. It is
@@ -11,27 +11,27 @@ using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
-    // Labels, entries and tooltips are "ParalivesFSR_*" translation keys (see Localization.cs).
-    [TranslatedLabel("ParalivesFSR_")]
+    // Labels, entries and tooltips are "ParalivesUpscaling_*" translation keys (see Localization.cs).
+    [TranslatedLabel("ParalivesUpscaling_")]
     public sealed class FsrOptions
     {
         // field order = menu order: technology (with Off) first, then the quality preset
-        [TranslatedText("ParalivesFSR_Version_")]
-        [Tooltip("ParalivesFSR_Tip_UpscalerVersion")]
+        [TranslatedText("ParalivesUpscaling_Version_")]
+        [Tooltip("ParalivesUpscaling_Tip_UpscalerVersion")]
         public FsrVersion UpscalerVersion;
 
-        [TranslatedText("ParalivesFSR_Mode_")]
-        [Tooltip("ParalivesFSR_Tip_Upscaler")]
+        [TranslatedText("ParalivesUpscaling_Mode_")]
+        [Tooltip("ParalivesUpscaling_Tip_Upscaler")]
         public FsrMode Upscaler;
 
         [Slider(0f, 1f)]
         [Round(2)]
-        [Tooltip("ParalivesFSR_Tip_UpscalerSharpness")]
+        [Tooltip("ParalivesUpscaling_Tip_UpscalerSharpness")]
         public float UpscalerSharpness;
 
-        [Tooltip("ParalivesFSR_Tip_UpscalerShowInfo")]
+        [Tooltip("ParalivesUpscaling_Tip_UpscalerShowInfo")]
         public bool UpscalerShowInfo;
 
         internal static readonly FsrOptions Instance = new FsrOptions();
@@ -63,22 +63,22 @@ namespace ParalivesFSR
     }
 
     /// <summary>Read-only twin of FsrOptions, shown when the game is not running on DirectX 12.</summary>
-    [TranslatedLabel("ParalivesFSR_")]
+    [TranslatedLabel("ParalivesUpscaling_")]
     public sealed class FsrOptionsNeedsDx12
     {
-        [Header("ParalivesFSR_NeedsDx12")]
-        [TranslatedText("ParalivesFSR_Version_")]
-        [Tooltip("ParalivesFSR_Tip_NeedsDx12")]
+        [Header("ParalivesUpscaling_NeedsDx12")]
+        [TranslatedText("ParalivesUpscaling_Version_")]
+        [Tooltip("ParalivesUpscaling_Tip_NeedsDx12")]
         public FsrVersion UpscalerVersion;
 
-        [TranslatedText("ParalivesFSR_Mode_")]
-        [Tooltip("ParalivesFSR_Tip_NeedsDx12")]
+        [TranslatedText("ParalivesUpscaling_Mode_")]
+        [Tooltip("ParalivesUpscaling_Tip_NeedsDx12")]
         public FsrMode Upscaler;
 
         [Slider(0f, 1f)]
         [Round(2)]
         [DisableInspectorEdition]
-        [Tooltip("ParalivesFSR_Tip_NeedsDx12")]
+        [Tooltip("ParalivesUpscaling_Tip_NeedsDx12")]
         public float UpscalerSharpness;
 
         internal static readonly FsrOptionsNeedsDx12 Instance = new FsrOptionsNeedsDx12();

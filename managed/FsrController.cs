@@ -1,4 +1,4 @@
-// ParalivesFSR - camera management (same scheme as the DLSS mod, ported to URP 17):
+// ParalivesUpscaling - camera management (same scheme as the DLSS mod, ported to URP 17):
 //  * A hidden render camera copies the game camera every frame and renders the world, without post-processing,
 //    into a low-resolution HDR texture through a jittered projection. URP also renders depth and motion vectors
 //    (camera + per-object) for it.
@@ -18,7 +18,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
     public sealed unsafe class FsrController : MonoBehaviour
     {
@@ -82,7 +82,7 @@ namespace ParalivesFSR
         // dies in between, the next start switches FSR off instead of crash-looping.
         private static string MarkerPath
         {
-            get { return Path.Combine(Path.Combine(Paths.CachePath, "ParalivesFSR"), "starting.marker"); }
+            get { return Path.Combine(Path.Combine(Paths.CachePath, "ParalivesUpscaling"), "starting.marker"); }
         }
 
         private bool _markerSet;
@@ -120,23 +120,23 @@ namespace ParalivesFSR
                 {
                     File.Delete(MarkerPath);
                     O.Version.Value = FsrVersion.Off;
-                    Plugin.Log.LogError("The game closed while FSR was starting last time, so FSR has been switched off. " +
-                                        "You can switch it back on in Options > Video > Upscaler. If it happens again, please report it with " +
-                                        "BepInEx\\LogOutput.log and Paralives_Data\\Plugins\\x86_64\\ParalivesFSR.log.");
+                    Plugin.Log.LogError("The game closed while the upscaler was starting last time, so it has been switched off. " +
+                                        "You can switch it back on in Options > Video > Upscaling (FSR / XeSS). If it happens again, please report it with " +
+                                        "BepInEx\\LogOutput.log and Paralives_Data\\Plugins\\x86_64\\ParalivesUpscaling.log.");
                 }
             }
             catch { }
             _slots = (FrameData*)Marshal.AllocHGlobal(sizeof(FrameData) * Slots);
             _frame = _slots;
             *_frame = default(FrameData);
-            _cbCtl = new CommandBuffer { name = "ParalivesFSR control" };
+            _cbCtl = new CommandBuffer { name = "ParalivesUpscaling control" };
             try
             {
                 EventFunc = Native.PFSR_GetRenderEventFunc();  // first call loads the DLL -> UnityPluginLoad
             }
             catch (Exception e)
             {
-                Plugin.Log.LogError("ParalivesFSR.dll could not be loaded (it belongs in Paralives_Data\\Plugins\\x86_64): " + e.Message);
+                Plugin.Log.LogError("ParalivesUpscaling.dll could not be loaded (it belongs in Paralives_Data\\Plugins\\x86_64): " + e.Message);
                 enabled = false;
             }
             // picking something in the menu again retries after a failure
@@ -179,8 +179,8 @@ namespace ParalivesFSR
                 if (_active)
                 {
                     int state = Native.PFSR_GetStatus(Native.StState);
-                    if (state == -1) Fail("FSR could not start: " + Native.LastError);
-                    else if (state == -2 && Native.PFSR_GetStatus(Native.StCreatedGen) == _createGen) Fail("FSR stopped: " + Native.LastError);
+                    if (state == -1) Fail("Upscaler could not start: " + Native.LastError);
+                    else if (state == -2 && Native.PFSR_GetStatus(Native.StCreatedGen) == _createGen) Fail("Upscaler stopped: " + Native.LastError);
                 }
 
                 Camera target = (O.Version.Value != FsrVersion.Off && !_disabledByError) ? FindGameCamera() : null;
@@ -205,7 +205,7 @@ namespace ParalivesFSR
                 if (_presentingFsr && _reportedVersion == null)
                 {
                     _reportedVersion = Native.VersionName;
-                    Plugin.Log.LogInfo("FSR running: " + _reportedVersion + ", " + _inW + "x" + _inH + " -> " + _outW + "x" + _outH + ".");
+                    Plugin.Log.LogInfo("Upscaler running: " + _reportedVersion + ", " + _inW + "x" + _inH + " -> " + _outW + "x" + _outH + ".");
                     LogInventory();
                 }
                 _render.depth = _main.depth - 1f;
@@ -217,8 +217,8 @@ namespace ParalivesFSR
             }
             catch (Exception e)
             {
-                Plugin.Log.LogError("FSR error: " + e);
-                Fail("FSR error: " + e.Message);
+                Plugin.Log.LogError("Upscaler error: " + e);
+                Fail("Upscaler error: " + e.Message);
             }
         }
 
@@ -404,16 +404,16 @@ namespace ParalivesFSR
         {
             if (!O.ShowInfo.Value || Event.current.type != EventType.Repaint) return;
             string text;
-            if (O.Version.Value == FsrVersion.Off) text = Localization.Translate("ParalivesFSR_Version_Off");
+            if (O.Version.Value == FsrVersion.Off) text = Localization.Translate("ParalivesUpscaling_Version_Off");
             else if (_presentingFsr)
             {
                 string name = Native.VersionName;
                 if (!name.StartsWith("XeSS", StringComparison.Ordinal)) name = "FSR " + name;
-                text = name + " · " + Localization.Translate("ParalivesFSR_Mode_" + _activeMode) + " · " +
+                text = name + " · " + Localization.Translate("ParalivesUpscaling_Mode_" + _activeMode) + " · " +
                        _inW + "x" + _inH + " → " + _outW + "x" + _outH;
             }
-            else if (_active) text = Localization.Translate("ParalivesFSR_Status_Starting");
-            else text = Localization.Translate("ParalivesFSR_Status_Unavailable");
+            else if (_active) text = Localization.Translate("ParalivesUpscaling_Status_Starting");
+            else text = Localization.Translate("ParalivesUpscaling_Status_Unavailable");
 
             if (_infoStyle == null) _infoStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.UpperCenter };
             _infoStyle.fontSize = Mathf.Max(12, Screen.height / 60);
@@ -444,19 +444,19 @@ namespace ParalivesFSR
         {
             if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12)
             {
-                Fail("FSR needs DirectX 12 (game is running " + SystemInfo.graphicsDeviceType + "). Add -force-d3d12 to the Steam launch options.");
+                Fail("FSR and XeSS need DirectX 12 (game is running " + SystemInfo.graphicsDeviceType + "). Add -force-d3d12 to the Steam launch options.");
                 return false;
             }
             if (Native.PFSR_GetStatus(Native.StState) < 1)
             {
-                Fail("FSR runtime not ready: " + Native.LastError);
+                Fail("Upscaler runtime not ready: " + Native.LastError);
                 return false;
             }
             _mainData = main.GetUniversalAdditionalCameraData();
             if (_mainData == null) { Fail("Game camera has no URP camera data."); return false; }
 
             _main = main;
-            var go = new GameObject("ParalivesFSR.RenderCamera") { hideFlags = HideFlags.HideAndDontSave };
+            var go = new GameObject("ParalivesUpscaling.RenderCamera") { hideFlags = HideFlags.HideAndDontSave };
             DontDestroyOnLoad(go);
             go.SetActive(false);
             _render = go.AddComponent<Camera>();
@@ -475,7 +475,7 @@ namespace ParalivesFSR
             Rebuild();
             go.SetActive(true);
             _render.enabled = true;
-            Plugin.Log.LogInfo("FSR render path active (" + _activeMode + ").");
+            Plugin.Log.LogInfo("Upscaling render path active (" + _activeMode + ").");
             return true;
         }
 
@@ -495,7 +495,7 @@ namespace ParalivesFSR
                     if (string.IsNullOrEmpty(LayerMask.LayerToName(i))) layer = i;
                 if (layer < 0) { Plugin.Log.LogWarning("No spare layer for the AO override; contact shadows stay at the game's resolution."); return; }
 
-                var go = new GameObject("ParalivesFSR.AOVolume") { hideFlags = HideFlags.HideAndDontSave, layer = layer };
+                var go = new GameObject("ParalivesUpscaling.AOVolume") { hideFlags = HideFlags.HideAndDontSave, layer = layer };
                 DontDestroyOnLoad(go);
                 _aoVolume = go.AddComponent<Volume>();
                 _aoVolume.isGlobal = true;
@@ -541,17 +541,17 @@ namespace ParalivesFSR
 
             IssueEvent(Native.EvDestroy, IntPtr.Zero);
             ReleaseTargets();
-            _color = MakeRT(_inW, _inH, 24, RenderTextureFormat.ARGBHalf, false, "ParalivesFSR.Color");
-            _depth = MakeRT(_inW, _inH, 0, RenderTextureFormat.RFloat, false, "ParalivesFSR.Depth");
-            _motion = MakeRT(_inW, _inH, 0, RenderTextureFormat.RGHalf, false, "ParalivesFSR.Motion");
-            _output = MakeRT(_outW, _outH, 0, RenderTextureFormat.ARGBHalf, true, "ParalivesFSR.Output");
+            _color = MakeRT(_inW, _inH, 24, RenderTextureFormat.ARGBHalf, false, "ParalivesUpscaling.Color");
+            _depth = MakeRT(_inW, _inH, 0, RenderTextureFormat.RFloat, false, "ParalivesUpscaling.Depth");
+            _motion = MakeRT(_inW, _inH, 0, RenderTextureFormat.RGHalf, false, "ParalivesUpscaling.Motion");
+            _output = MakeRT(_outW, _outH, 0, RenderTextureFormat.ARGBHalf, true, "ParalivesUpscaling.Output");
             _hColor = RTHandles.Alloc(_color);
             _hDepth = RTHandles.Alloc(_depth);
             _hMotion = RTHandles.Alloc(_motion);
             _hOutput = RTHandles.Alloc(_output);
-            _depthAtt = MakeRT(_inW, _inH, 0, RenderTextureFormat.RFloat, false, "ParalivesFSR.DepthAttachment");
-            _motionFix = MakeRT(_inW, _inH, 0, RenderTextureFormat.RGHalf, true, "ParalivesFSR.MotionFixed");
-            _reactive = MakeRT(_inW, _inH, 0, RenderTextureFormat.R8, true, "ParalivesFSR.Reactive");
+            _depthAtt = MakeRT(_inW, _inH, 0, RenderTextureFormat.RFloat, false, "ParalivesUpscaling.DepthAttachment");
+            _motionFix = MakeRT(_inW, _inH, 0, RenderTextureFormat.RGHalf, true, "ParalivesUpscaling.MotionFixed");
+            _reactive = MakeRT(_inW, _inH, 0, RenderTextureFormat.R8, true, "ParalivesUpscaling.Reactive");
             _hDepthAtt = RTHandles.Alloc(_depthAtt);
             _pColor = _color.GetNativeTexturePtr();
             _pDepth = _depth.GetNativeTexturePtr();
@@ -577,7 +577,7 @@ namespace ParalivesFSR
             _resetFrames = 3;
             _presentingFsr = false;
             _reportedVersion = null;
-            Plugin.Log.LogInfo("FSR " + _activeMode + " (" + _activeVersion + "): rendering " + _inW + "x" + _inH +
+            Plugin.Log.LogInfo("Upscaling " + _activeMode + " (" + _activeVersion + "): rendering " + _inW + "x" + _inH +
                                ", output " + _outW + "x" + _outH + ", jitter phases " + _jitterPhases + ".");
         }
 
@@ -609,7 +609,7 @@ namespace ParalivesFSR
             _render = null; _renderData = null;
             _main = null; _mainData = null;
             _presentingFsr = false;
-            Plugin.Log.LogInfo("FSR render path off; game camera restored.");
+            Plugin.Log.LogInfo("Upscaling render path off; game camera restored.");
         }
 
         private void Fail(string why)
@@ -658,7 +658,7 @@ namespace ParalivesFSR
             }
             catch (Exception e)
             {
-                Plugin.Log.LogError("FSR camera hook error: " + e.Message);
+                Plugin.Log.LogError("Upscaling camera hook error: " + e.Message);
             }
         }
 

@@ -1,11 +1,11 @@
-// ParalivesFSR - native render-thread side.
+// ParalivesUpscaling - native render-thread side.
 //
 // Runs AMD FSR (3.1 or 4, through the FidelityFX API loader) on Unity's own D3D12 device.
 // FSR records into a command list of ours, handed to Unity with IUnityGraphicsD3D12v6::ExecuteCommandList
 // together with the resource states FSR expects, so Unity inserts the barriers and keeps tracking states.
 // Before FSR, a small compute pass repairs URP's motion vectors where the depth prepass missed geometry
 // (the game's characters), using the camera's real depth buffer.
-// Writes ParalivesFSR.log next to this DLL.
+// Writes ParalivesUpscaling.log next to this DLL.
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
@@ -63,7 +63,7 @@ static void Log(const char *fmt, ...)
 {
     char line[1024];
     va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
-    wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%sParalivesFSR.log", s_dir);
+    wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%sParalivesUpscaling.log", s_dir);
     SYSTEMTIME t; GetLocalTime(&t);
     if (FILE *f = _wfopen(path, L"a")) { fprintf(f, "%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, line); fclose(f); }
 }
@@ -170,7 +170,7 @@ static UINT s_mvInc;
 static bool InitMotionFix()
 {
     ID3DBlob *code = nullptr, *err = nullptr;
-    HRESULT hr = D3DCompile(kMotionFixHlsl, strlen(kMotionFixHlsl), "ParalivesFSR_MotionFix", nullptr, nullptr, "main", "cs_5_1",
+    HRESULT hr = D3DCompile(kMotionFixHlsl, strlen(kMotionFixHlsl), "ParalivesUpscaling_MotionFix", nullptr, nullptr, "main", "cs_5_1",
                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err);
     if (FAILED(hr)) { Log("motion fix: compile failed: %s", err ? (const char *)err->GetBufferPointer() : "?"); if (err) err->Release(); return false; }
 
@@ -306,7 +306,7 @@ static bool LoadXess()
     wchar_t path[MAX_PATH];
     swprintf(path, MAX_PATH, L"%slibxess.dll", s_dir);
     s_xessLib = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!s_xessLib) { Log("XeSS: libxess.dll not found next to ParalivesFSR.dll (%lu)", GetLastError()); return false; }
+    if (!s_xessLib) { Log("XeSS: libxess.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
     pXCreate = (decltype(pXCreate))GetProcAddress(s_xessLib, "xessD3D12CreateContext");
     pXBuild = (decltype(pXBuild))GetProcAddress(s_xessLib, "xessD3D12BuildPipelines");
     pXInit = (decltype(pXInit))GetProcAddress(s_xessLib, "xessD3D12Init");
@@ -560,9 +560,9 @@ static bool LoadFfx()
     wchar_t up[MAX_PATH], ld[MAX_PATH];
     swprintf(up, MAX_PATH, L"%samd_fidelityfx_upscaler_dx12.dll", s_dir);
     swprintf(ld, MAX_PATH, L"%samd_fidelityfx_loader_dx12.dll", s_dir);
-    if (!LoadLibraryW(up)) { Fail(-1, "amd_fidelityfx_upscaler_dx12.dll not found next to ParalivesFSR.dll (%lu)", GetLastError()); return false; }
+    if (!LoadLibraryW(up)) { Fail(-1, "amd_fidelityfx_upscaler_dx12.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
     HMODULE m = LoadLibraryW(ld);
-    if (!m) { Fail(-1, "amd_fidelityfx_loader_dx12.dll not found next to ParalivesFSR.dll (%lu)", GetLastError()); return false; }
+    if (!m) { Fail(-1, "amd_fidelityfx_loader_dx12.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
     pCreate = (PfnFfxCreateContext)GetProcAddress(m, "ffxCreateContext");
     pDestroy = (PfnFfxDestroyContext)GetProcAddress(m, "ffxDestroyContext");
     pQuery = (PfnFfxQuery)GetProcAddress(m, "ffxQuery");
@@ -630,7 +630,7 @@ EXPORT void UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces *ifs)
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&UnityPluginLoad, &self);
     GetModuleFileNameW(self, s_dir, MAX_PATH);
     if (wchar_t *slash = wcsrchr(s_dir, L'\\')) slash[1] = 0;
-    Log("---- ParalivesFSR native loaded");
+    Log("---- ParalivesUpscaling native loaded");
 
     s_ifs = ifs;
     s_gfx = ifs->Get<IUnityGraphics>();

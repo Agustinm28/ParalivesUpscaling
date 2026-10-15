@@ -1,17 +1,17 @@
-// ParalivesFSR - translations for our options, in the languages the game ships.
+// ParalivesUpscaling - translations for our options, in the languages the game ships.
 //
-// Every label, dropdown entry, header and tooltip of FsrOptions is a "ParalivesFSR_*" key. The game resolves all of
+// Every label, dropdown entry, header and tooltip of FsrOptions is a "ParalivesUpscaling_*" key. The game resolves all of
 // them through TranslationManager.Get, so a prefix there answers our keys for the game's current language (English
 // fallback) and the options follow the language setting like the game's own labels.
 using System;
 using System.Collections.Generic;
 using HarmonyLib;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
     internal static class Localization
     {
-        private const string Prefix = "ParalivesFSR_";
+        private const string Prefix = "ParalivesUpscaling_";
 
         // key (without prefix) -> en, es, pt, fr, de, it, pl, zh
         private static readonly string[] Locales = { "en", "es", "pt", "fr", "de", "it", "pl", "zh" };
@@ -97,7 +97,7 @@ namespace ParalivesFSR
             },
         };
 
-        /// <summary>Text for a key containing "ParalivesFSR_" (the game may add its own prefix in front), or null.</summary>
+        /// <summary>Text for a key containing "ParalivesUpscaling_" (the game may add its own prefix in front), or null.</summary>
         internal static string Translate(string key)
         {
             int at = key.IndexOf(Prefix, StringComparison.Ordinal);
@@ -127,7 +127,7 @@ namespace ParalivesFSR
     {
         private static bool Prefix(string key, ref string __result)
         {
-            if (key == null || key.IndexOf("ParalivesFSR_", StringComparison.Ordinal) < 0) return true;
+            if (key == null || key.IndexOf("ParalivesUpscaling_", StringComparison.Ordinal) < 0) return true;
             string text = Localization.Translate(key);
             if (text == null) return true;
             __result = text;

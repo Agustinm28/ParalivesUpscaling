@@ -1,12 +1,12 @@
-// ParalivesFSR - interop with ParalivesFSR.dll (Paralives_Data\Plugins\x86_64).
+// ParalivesUpscaling - interop with ParalivesUpscaling.dll (Paralives_Data\Plugins\x86_64).
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
-    /// <summary>Must match FrameData in ParalivesFSR.cpp.</summary>
+    /// <summary>Must match FrameData in ParalivesUpscaling.cpp.</summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct FrameData
     {
@@ -29,7 +29,7 @@ namespace ParalivesFSR
 
     internal static class Native
     {
-        private const string Dll = "ParalivesFSR";
+        private const string Dll = "ParalivesUpscaling";
 
         internal const int EvCreate = 1, EvDispatch = 2, EvDestroy = 3;
         internal const int StState = 0, StDispatches = 1, StDispatchesSinceCreate = 2, StCreatedGen = 3;

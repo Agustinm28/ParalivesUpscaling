@@ -1,4 +1,4 @@
-// ParalivesFSR - URP 17 Render Graph passes, enqueued per camera from FsrController.
+// ParalivesUpscaling - URP 17 Render Graph passes, enqueued per camera from FsrController.
 using System;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -6,7 +6,7 @@ using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.RenderGraphModule.Util;
 using UnityEngine.Rendering.Universal;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
     /// <summary>
     /// Render camera: copy depth + URP motion vectors into our persistent textures (their native pointers are
@@ -35,7 +35,7 @@ namespace ParalivesFSR
             var res = frameData.Get<UniversalResourceData>();
             if (!res.cameraDepthTexture.IsValid() || !res.motionVectorColor.IsValid() || !res.backBufferColor.IsValid()) return;
 
-            using (var builder = renderGraph.AddUnsafePass<PassData>("ParalivesFSR upscale", out var data))
+            using (var builder = renderGraph.AddUnsafePass<PassData>("ParalivesUpscaling upscale", out var data))
             {
                 data.Depth = res.cameraDepthTexture;
                 data.Motion = res.motionVectorColor;
@@ -90,7 +90,7 @@ namespace ParalivesFSR
             bool flip = c.FlipPresent;
             renderGraph.AddBlitPass(src, res.activeColorTexture,
                 flip ? new Vector2(1f, -1f) : Vector2.one, flip ? new Vector2(0f, 1f) : Vector2.zero,
-                passName: "ParalivesFSR present");
+                passName: "ParalivesUpscaling present");
         }
     }
 }

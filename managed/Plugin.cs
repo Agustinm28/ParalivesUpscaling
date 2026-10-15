@@ -1,4 +1,4 @@
-// ParalivesFSR - BepInEx 5 entry point and settings.
+// ParalivesUpscaling - BepInEx 5 entry point and settings.
 using System;
 using BepInEx;
 using BepInEx.Configuration;
@@ -6,7 +6,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
-namespace ParalivesFSR
+namespace ParalivesUpscaling
 {
     // Quality preset (render-resolution scale).
     public enum FsrMode { NativeAA, Quality, Balanced, Performance, UltraPerformance }
@@ -15,11 +15,11 @@ namespace ParalivesFSR
     // it cannot start) and FSR4 falls back to the newest FSR the driver offers.
     public enum FsrVersion { Off = 0, FSR3 = 3, FSR4 = 4, XeSS = 10 }
 
-    [BepInPlugin(Id, "Paralives FSR", Version)]
+    [BepInPlugin(Id, "Paralives Upscaling", Version)]
     [BepInProcess("Paralives.exe")]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Id = "paralives.fsr";
+        public const string Id = "paralives.upscaling";
         public const string Version = "0.1.0";
 
         internal static ManualLogSource Log;
@@ -36,10 +36,10 @@ namespace ParalivesFSR
                 try { harmony.CreateClassProcessor(t).Patch(); }
                 catch (Exception e) { Log.LogWarning("Hook " + t.Name + " not installed: " + e.Message); }
             }
-            var go = new GameObject("ParalivesFSR.Controller") { hideFlags = HideFlags.HideAndDontSave };
+            var go = new GameObject("ParalivesUpscaling.Controller") { hideFlags = HideFlags.HideAndDontSave };
             DontDestroyOnLoad(go);
             go.AddComponent<FsrController>();
-            Log.LogInfo("Paralives FSR " + Version + " loaded. Mode: " + O.Mode.Value + ", version: " + O.Version.Value);
+            Log.LogInfo("Paralives Upscaling " + Version + " loaded. Mode: " + O.Mode.Value + ", version: " + O.Version.Value);
         }
     }
 
