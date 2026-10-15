@@ -7,6 +7,7 @@
 //    then runs the game's post-processing (bloom, vignette) at full resolution, and the stacked UI camera draws
 //    the UI on top.
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -98,12 +99,16 @@ namespace ParalivesFSR
         {
             RenderPipelineManager.beginCameraRendering += OnBeginCamera;
             RenderPipelineManager.endCameraRendering += OnEndCamera;
+            RenderPipelineManager.beginContextRendering += OnBeginContext;
+            RenderPipelineManager.endContextRendering += OnEndContext;
         }
 
         private void OnDisable()
         {
             RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
             RenderPipelineManager.endCameraRendering -= OnEndCamera;
+            RenderPipelineManager.beginContextRendering -= OnBeginContext;
+            RenderPipelineManager.endContextRendering -= OnEndContext;
             ReleaseMain();
             ReleaseScale();
         }
@@ -118,6 +123,7 @@ namespace ParalivesFSR
             // the game camera can never legitimately be held here; recover if URP skipped endCameraRendering
             ReleaseMain();
             FsrOptions.Instance.Sync();
+            if (O.PerfLog.Value) PerfTick();
             if (EventFunc == IntPtr.Zero) return;
             try
             {
@@ -195,6 +201,69 @@ namespace ParalivesFSR
                 }
                 Plugin.Log.LogInfo(sb.ToString());
             });
+        }
+
+        // PerfLog: frame rate, CPU/GPU times (FrameTimingManager) and every camera rendered, every 2 s, so we can tell
+        // whether the game is CPU- or GPU-bound and what upscaling actually saves.
+        private readonly FrameTiming[] _timing = new FrameTiming[1];
+        private readonly Dictionary<string, int> _camerasSeen = new Dictionary<string, int>();
+        private float _perfStart = -1f;
+        private int _perfFrames, _timingSamples;
+        private double _cpu, _cpuMain, _cpuRender, _gpu;
+
+        // main-thread time URP spends recording each frame (all cameras): the part our second camera adds to
+        private readonly System.Diagnostics.Stopwatch _renderWatch = new System.Diagnostics.Stopwatch();
+        private double _renderMs, _frameMs;
+
+        private void OnBeginContext(ScriptableRenderContext ctx, List<Camera> cams)
+        {
+            if (O.PerfLog.Value) _renderWatch.Restart();
+        }
+
+        private void OnEndContext(ScriptableRenderContext ctx, List<Camera> cams)
+        {
+            if (O.PerfLog.Value && _renderWatch.IsRunning) { _renderWatch.Stop(); _renderMs += _renderWatch.Elapsed.TotalMilliseconds; }
+        }
+
+        private void CountCamera(Camera cam)
+        {
+            string key = cam.name + " " + cam.pixelWidth + "x" + cam.pixelHeight + (cam.targetTexture != null ? " (RT)" : "");
+            int n;
+            _camerasSeen.TryGetValue(key, out n);
+            _camerasSeen[key] = n + 1;
+        }
+
+        private void PerfTick()
+        {
+            FrameTimingManager.CaptureFrameTimings();
+            if (FrameTimingManager.GetLatestTimings(1, _timing) > 0)
+            {
+                _cpu += _timing[0].cpuFrameTime;
+                _cpuMain += _timing[0].cpuMainThreadFrameTime;
+                _cpuRender += _timing[0].cpuRenderThreadFrameTime;
+                _gpu += _timing[0].gpuFrameTime;
+                _timingSamples++;
+            }
+            if (_perfStart < 0f) { _perfStart = Time.unscaledTime; _renderMs = _frameMs = 0; return; }
+            _perfFrames++;
+            _frameMs += Time.unscaledDeltaTime * 1000.0;
+            float t = Time.unscaledTime - _perfStart;
+            if (t < 2f) return;
+
+            int s = Math.Max(1, _timingSamples);
+            var sb = new StringBuilder("Perf [" + (_active ? O.Mode.Value + " " + Native.VersionName + " " + _inW + "x" + _inH : "Off") + "] " +
+                                       (_perfFrames / t).ToString("0.0") + " fps | frame " + (_frameMs / _perfFrames).ToString("0.00") +
+                                       " ms, URP main-thread render " + (_renderMs / _perfFrames).ToString("0.00") + " ms | CPU " + (_cpu / s).ToString("0.00") + " ms (main " +
+                                       (_cpuMain / s).ToString("0.00") + ", render " + (_cpuRender / s).ToString("0.00") + ") | GPU " +
+                                       (_gpu / s).ToString("0.00") + " ms" + (_timingSamples == 0 ? " (frame timing unavailable)" : "") +
+                                       " | cap " + Application.targetFrameRate + ", vsync " + QualitySettings.vSyncCount + " | cameras/frame:");
+            foreach (var kv in _camerasSeen)
+                sb.Append(" " + kv.Key + " x" + ((float)kv.Value / _perfFrames).ToString("0.##") + ";");
+            Plugin.Log.LogInfo(sb.ToString());
+            _camerasSeen.Clear();
+            _perfStart = Time.unscaledTime;
+            _perfFrames = _timingSamples = 0;
+            _cpu = _cpuMain = _cpuRender = _gpu = _renderMs = _frameMs = 0;
         }
 
         // Once per session: the pipeline settings, post effects and renderer features FSR has to live with.
@@ -492,6 +561,7 @@ namespace ParalivesFSR
         // =====================================================================================
         private void OnBeginCamera(ScriptableRenderContext ctx, Camera cam)
         {
+            if (cam != null && O.PerfLog.Value) CountCamera(cam);
             if (!_active || _suspended || cam == null) return;
             try
             {

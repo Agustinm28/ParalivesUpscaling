@@ -15,7 +15,7 @@ namespace ParalivesFSR
         [Tooltip("AMD FSR upscaling: Native AA (1.0x), Quality (1.5x), Balanced (1.7x), Performance (2.0x), Ultra Performance (3.0x). Needs -force-d3d12.")]
         public FsrMode Upscaler;
 
-        [Tooltip("Auto lets the AMD runtime pick (FSR 4 on RX 9000 cards). FSR3 / FSR4 force one; FSR4 falls back if unsupported.")]
+        [Tooltip("Auto uses the best version your GPU and driver support (FSR 4 on Radeon RX 9000, and RX 7000 with recent drivers; FSR 3 otherwise). FSR3 / FSR4 force one; FSR4 falls back to FSR 3 if unsupported.")]
         public FsrVersion UpscalerVersion;
 
         [Slider(0f, 1f)]
@@ -23,16 +23,11 @@ namespace ParalivesFSR
         [Tooltip("FSR sharpening. 0 = off.")]
         public float UpscalerSharpness;
 
-        [Slider(0f, 1f)]
-        [Round(2)]
-        [Tooltip("FSR 3 only: how much FSR trusts the current frame on characters. Higher = less trailing on walking characters, slightly less smoothing.")]
-        public float UpscalerCharacterReactivity;
-
         internal static readonly FsrOptions Instance = new FsrOptions();
 
         private FsrMode _mode;
         private FsrVersion _version;
-        private float _sharpness, _reactivity;
+        private float _sharpness;
         private bool _initialised;
 
         /// <summary>Called every frame: menu edits go to the config, config changes go to the menu.</summary>
@@ -44,12 +39,10 @@ namespace ParalivesFSR
                 if (Upscaler != _mode) o.Mode.Value = Upscaler;
                 if (UpscalerVersion != _version) o.Version.Value = UpscalerVersion;
                 if (!Mathf.Approximately(UpscalerSharpness, _sharpness)) o.Sharpness.Value = UpscalerSharpness;
-                if (!Mathf.Approximately(UpscalerCharacterReactivity, _reactivity)) o.CharacterReactive.Value = UpscalerCharacterReactivity;
             }
             Upscaler = _mode = o.Mode.Value;
             UpscalerVersion = _version = o.Version.Value;
             UpscalerSharpness = _sharpness = o.Sharpness.Value;
-            UpscalerCharacterReactivity = _reactivity = o.CharacterReactive.Value;
             _initialised = true;
         }
     }
