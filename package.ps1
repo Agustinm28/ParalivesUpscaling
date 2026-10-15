@@ -28,6 +28,7 @@ $amd = (Get-Content "$root\native\ffx\api\include\ffx_api.h" -TotalCount 21) -re
 Set-Content "$licenses\AMD_FidelityFX_SDK.txt" $amd
 Copy-Item "$root\native\xess\LICENSE.txt" "$licenses\Intel_XeSS_SDK.txt"
 Copy-Item "$root\native\dlss\LICENSE.txt" "$licenses\NVIDIA_DLSS_SDK.txt"
+Copy-Item "$root\LICENSE" "$licenses\Paralives_Upscaling_MIT.txt"
 
 $zip = "$root\dist\paralives_upscaling-$version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
