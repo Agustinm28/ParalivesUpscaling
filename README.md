@@ -1,13 +1,15 @@
 # ParalivesFSR
 
-Native AMD FSR 3.1 and FSR 4 upscaling / anti-aliasing for **Paralives**, as a BepInEx mod.
+Native AMD FSR 3.1 / FSR 4 and Intel XeSS upscaling and anti-aliasing for **Paralives**, as a BepInEx mod.
 
-No OptiScaler, no DLL proxies: the mod drives the official AMD FidelityFX SDK directly on the game's own DirectX 12
-device, and integrates with the game's render pipeline (Unity 6, URP) so FSR gets proper depth and motion vectors.
+No OptiScaler, no DLL proxies: the mod drives the official AMD FidelityFX SDK and Intel XeSS SDK directly on the
+game's own DirectX 12 device, and integrates with the game's render pipeline (Unity 6, URP) so the upscaler gets proper
+depth and motion vectors.
 
 ## Features
 
 - **FSR 4** (machine-learning upscaler) and **FSR 3.1**, picked automatically or forced from the options menu.
+- **Intel XeSS** (XMX path on Intel Arc, DP4a path on most other DirectX 12 GPUs), with automatic fallback to FSR.
 - **Native AA** mode: FSR as anti-aliasing at full resolution, a sharper and more stable replacement for MSAA/SMAA.
 - Upscaling modes from Quality (1.5x) to Ultra Performance (3.0x).
 - Settings live in the game's own **Options > Video** menu and apply instantly, without restarting.
@@ -26,9 +28,10 @@ device, and integrates with the game's render pipeline (Unity 6, URP) so FSR get
 | Graphics API | **DirectX 12**: add `-force-d3d12` to the game's Steam launch options |
 | FSR 3.1 | Any DirectX 12 GPU (AMD, NVIDIA, Intel) |
 | FSR 4 | AMD Radeon RX 9000 series; RX 7000 series with a recent driver |
+| Intel XeSS | Best on Intel Arc; works on most DirectX 12 GPUs with Shader Model 6.4 (DP4a) |
 
-FSR has no DirectX 11 backend, so the mod does nothing on DirectX 11 (the game's default). On tested hardware the game
-runs as fast or faster on DirectX 12.
+The mod only works on DirectX 12, not on DirectX 11 (the game's default). On tested hardware the game runs as fast or
+faster on DirectX 12.
 
 ## Installation
 
@@ -41,11 +44,12 @@ runs as fast or faster on DirectX 12.
    | `ParalivesFSR.dll` (native) | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_loader_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_upscaler_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
+   | `libxess.dll` | `Paralives_Data\Plugins\x86_64\` |
 
 3. In Steam: Paralives > Properties > Launch options: `-force-d3d12`.
-4. Start the game and pick a mode in **Options > Video > Upscaler**.
+4. Start the game and pick a mode in **Options > Video > Upscaling (FSR / XeSS)**.
 
-To uninstall, delete those four files (and `BepInEx\config\paralives.fsr.cfg` if you want to reset the settings).
+To uninstall, delete those five files (and `BepInEx\config\paralives.fsr.cfg` if you want to reset the settings).
 
 ## Usage
 
@@ -53,9 +57,16 @@ In **Options > Video**:
 
 | Option | Values |
 |---|---|
-| **Upscaler** | Off, NativeAA, Quality, Balanced, Performance, UltraPerformance |
-| **Upscaler Version** | Auto (best your GPU and driver support), FSR3, FSR4. FSR4 falls back to FSR 3 if unsupported. |
-| **Upscaler Sharpness** | 0 (off) to 1 |
+| **Upscaling (FSR / XeSS)** | Off, FSR 3, FSR 4, Intel XeSS. The entries show the exact versions your driver offers (e.g. FSR 3.1.5, FSR 4.1.1, XeSS 2.0.2). FSR 4 falls back to FSR 3, XeSS to FSR, if unsupported. |
+| **Upscaling Quality** | Native AA, Quality, Balanced, Performance, Ultra Performance |
+| **FSR Sharpness** | 0 (off) to 1 (FSR only) |
+| **Show upscaler info on screen** | Shows at the top of the screen what is actually running, e.g. `XeSS 2.0.2 · Quality · 1707x960 → 2560x1440` (fallbacks included). |
+
+The same modes and render resolutions apply to XeSS (its Native AA, Ultra Quality, Quality, Balanced and Ultra
+Performance presets). Switching to XeSS the first time takes a moment while it compiles its shaders.
+
+The options follow the game's language (English, Spanish, Brazilian Portuguese, French, German, Italian, Polish,
+Simplified Chinese). Without DirectX 12 they are shown greyed out, with a note explaining how to enable it.
 
 | Mode | Scale | Render resolution at 2560x1440 |
 |---|---|---|
@@ -97,8 +108,9 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
 
 ## Known limitations
 
-- **Walking characters with FSR 3**: the game's character shaders produce no per-object motion vectors, so FSR 3 can
-  show slight flicker on characters while they walk. The mod softens it with a reactive mask; FSR 4 handles it well.
+- **Walking characters with FSR 3 / XeSS**: the game's character shaders produce no per-object motion vectors, so FSR 3
+  and XeSS can show slight flicker on characters while they walk. For FSR 3 the mod softens it with a reactive mask;
+  FSR 4 handles it well.
 - **Optimisation mod (6ix modpack)**: keep its `GameResolution = 1`; the mod pauses itself while another mod renders the
   game camera to a texture.
 - **ParalivesDLSS**: needs DirectX 11, this mod needs DirectX 12, so they never run together.
@@ -128,9 +140,11 @@ Logs:
 
 | Symptom | Cause / fix |
 |---|---|
-| Upscaler options do nothing | The game is on DirectX 11: add `-force-d3d12`. |
+| FSR options greyed out | The game is on DirectX 11: add `-force-d3d12`. |
+| FSR switched itself off after a crash | Crash guard: the game closed while FSR was starting, so the next start turned it off. Turn it back on in the menu; if it happens again, send both logs. |
 | "ParalivesFSR.dll could not be loaded" | The native DLL is missing from `Paralives_Data\Plugins\x86_64`. |
 | FSR4 picked but log says 3.1.x | Your GPU/driver does not offer FSR 4; update the driver. |
+| XeSS picked but log says FSR | XeSS could not start ("XeSS unavailable; falling back to FSR" in `ParalivesFSR.log`, with the reason). |
 
 ## How it works
 
@@ -138,8 +152,8 @@ Logs:
    low-resolution HDR texture through a sub-pixel jittered projection. URP renders depth and motion vectors for it.
 2. A render-graph pass copies URP's depth texture, the real depth buffer and URP's motion vectors.
 3. On the render thread, the native plugin records a small compute pass that rebuilds the motion vectors where URP's
-   depth prepass missed geometry (the characters) and writes a reactive mask there, then runs FSR through the
-   FidelityFX API into a full-resolution texture. The command list goes to Unity with
+   depth prepass missed geometry (the characters) and writes a reactive mask there, then runs FSR (FidelityFX API) or
+   XeSS into a full-resolution texture. The command list goes to Unity with
    `IUnityGraphicsD3D12v6::ExecuteCommandList` plus the resource states FSR expects, so Unity handles the barriers.
 4. The game camera draws no world; a pass copies the FSR output into it, the game's post-processing runs on top at
    full resolution, and the UI camera draws the UI.
@@ -165,6 +179,7 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 | `managed/` | BepInEx plugin (C#): cameras, render-graph passes, menu, Harmony patches |
 | `native/` | Native D3D12 plugin (C++): FidelityFX calls, motion-vector repair pass |
 | `native/ffx/` | AMD FidelityFX SDK v2.3.0 headers and signed runtime DLLs |
+| `native/xess/` | Intel XeSS SDK 3.0.2 headers and signed runtime DLL (its super-resolution library reports version 2.0.2) |
 | `native/Unity/` | Unity native plugin API headers |
 | `PLProbe/` | Test harness used to verify Unity's D3D12 plugin interface in this game |
 
@@ -172,7 +187,9 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 
 - AMD FidelityFX SDK (FSR 3.1 / FSR 4): © Advanced Micro Devices, MIT license. The `amd_fidelityfx_*.dll` files are
   AMD's signed binaries from SDK v2.3.0.
+- Intel XeSS SDK: © Intel Corporation, Intel Simplified Software License (`native/xess/LICENSE.txt`). `libxess.dll` is
+  Intel's signed binary from SDK 3.0.2.
 - Unity native plugin API headers: © Unity Technologies, Unity Companion License.
 - Camera scheme inspired by the ParalivesDLSS mod (Nexus Mods #400).
-- AMD, Radeon and FidelityFX are trademarks of Advanced Micro Devices. This is an unofficial fan mod, not made or
-  endorsed by AMD or Paralives Studio.
+- AMD, Radeon and FidelityFX are trademarks of Advanced Micro Devices; Intel, Arc and XeSS are trademarks of Intel
+  Corporation. This is an unofficial fan mod, not made or endorsed by AMD, Intel or Paralives Studio.
