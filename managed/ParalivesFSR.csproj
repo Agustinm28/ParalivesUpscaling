@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>ParalivesFSR</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>9.0</LangVersion>
+    <GamePath>D:\SteamLibrary\steamapps\common\Paralives</GamePath>
+    <Managed>$(GamePath)\Paralives_Data\Managed</Managed>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(GamePath)\BepInEx\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GamePath)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(Managed)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="Unity.RenderPipelines.Core.Runtime" HintPath="$(Managed)\Unity.RenderPipelines.Core.Runtime.dll" Private="false" />
+    <Reference Include="Unity.RenderPipelines.Universal.Runtime" HintPath="$(Managed)\Unity.RenderPipelines.Universal.Runtime.dll" Private="false" />
+    <Reference Include="Paralives" HintPath="$(Managed)\Paralives.dll" Private="false" />
+  </ItemGroup>
+</Project>
