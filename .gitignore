@@ -1,10 +1,15 @@
 **/bin/
 **/obj/
+# SDK runtimes and libs are part of the source tree
 !native/ffx/bin/
+!native/xess/bin/
+!native/dlss/bin/
 native/out/
+dist/
 *.obj
 *.exp
 *.lib
 !native/ffx/bin/*.lib
+!native/dlss/lib/*.lib
 PLProbe/native/PLProbe.dll
 .agents/
