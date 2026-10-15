@@ -37,18 +37,16 @@ faster on DirectX 12.
 
 ## Installation
 
-The release zip contains:
+Each release has two downloads with the same mod:
 
-| | |
-|---|---|
-| `Install.bat`, `setup.ps1` | The installer |
-| `files\` | The mod, laid out like the game folder |
-| `licenses\` | AMD FidelityFX, Intel XeSS and NVIDIA DLSS SDK licenses |
-| `README.md` | This file |
+| Download | Contents | Install by |
+|---|---|---|
+| `paralives_upscaling-<version>.zip` | The mod only, laid out like the game folder (README and licenses in `BepInEx\plugins\ParalivesUpscaling\`) | Extracting it into the Paralives folder ([manual installation](#manual-installation)) |
+| `paralives_upscaling-<version>-installer.zip` | `Install.bat` + `setup.ps1`, the mod under `files\`, README, licenses | Running the installer ([easy install](#easy-install)) |
 
-### Easy install (recommended)
+### Easy install
 
-1. **Extract the zip** (right-click > Extract All). Do not run `Install.bat` from inside the zip: Windows would only copy
+1. **Extract the installer zip** (right-click > Extract All). Do not run `Install.bat` from inside the zip: Windows would only copy
    the installer, without the mod files.
 2. Close Paralives if it is running, then run **`Install.bat`** from the extracted folder.
 3. The installer looks for the Paralives folder (next to the installer, then in your Steam libraries) and **asks you to
@@ -74,8 +72,10 @@ since other mods may use it. If you no longer need it, you can also remove `-for
 
 ### Manual installation
 
-1. Install BepInEx 5 x64 into the Paralives folder (the one with `Paralives.exe`) and start the game once.
-2. Copy the contents of the zip's `files` folder into the Paralives folder, which puts these files in place:
+1. Install [BepInEx 5 x64](https://github.com/BepInEx/BepInEx/releases) into the Paralives folder (the one with
+   `Paralives.exe`) and start the game once.
+2. Extract the mod-only zip (`paralives_upscaling-<version>.zip`) into the Paralives folder (or copy the installer zip's
+   `files` folder there), which puts these files in place:
 
    | File | Destination |
    |---|---|
@@ -215,11 +215,11 @@ in `managed/lib`).
 ```powershell
 .\install.ps1                                   # builds both parts and copies them into the game
 .\install.ps1 -Game "E:\Games\Paralives"        # other install location
-.\package.ps1                                   # builds the release zip: dist\paralives_upscaling-<version>.zip
+.\package.ps1                                   # builds both release zips in dist\
 ```
 
-The release zip contains `Install.bat` + `setup.ps1` (from `installer/`), the mod under `files\` laid out like the game
-folder, this README and the SDK licenses under `licenses\`.
+`package.ps1` builds the mod-only zip (game-folder layout, no scripts) and the installer zip (`Install.bat` +
+`setup.ps1` from `installer/`, the mod under `files\`, this README and the SDK licenses).
 
 `native\build.bat` and `dotnet build managed\ParalivesUpscaling.csproj -c Release` build each part on its own. If the game is
 not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `managed\ParalivesUpscaling.csproj`.
