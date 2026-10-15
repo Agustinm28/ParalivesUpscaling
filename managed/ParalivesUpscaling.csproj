@@ -10,8 +10,9 @@
     <GenerateDependencyFile>false</GenerateDependencyFile>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="BepInEx" HintPath="$(GamePath)\BepInEx\core\BepInEx.dll" Private="false" />
-    <Reference Include="0Harmony" HintPath="$(GamePath)\BepInEx\core\0Harmony.dll" Private="false" />
+    <!-- BepInEx 5.4.23.5 reference assemblies (lib\), so building does not need BepInEx installed in the game -->
+    <Reference Include="BepInEx" HintPath="lib\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="lib\0Harmony.dll" Private="false" />
     <Reference Include="UnityEngine" HintPath="$(Managed)\UnityEngine.dll" Private="false" />
     <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="Unity.RenderPipelines.Core.Runtime" HintPath="$(Managed)\Unity.RenderPipelines.Core.Runtime.dll" Private="false" />

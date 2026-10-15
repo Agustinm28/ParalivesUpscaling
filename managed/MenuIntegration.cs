@@ -49,7 +49,9 @@ namespace ParalivesUpscaling
             if (_initialised)
             {
                 if (Upscaler != _mode) o.Mode.Value = Upscaler;
-                if (UpscalerVersion != _version) o.Version.Value = UpscalerVersion;
+                // DLSS is listed (greyed out) on every GPU; picking it without an RTX card just snaps back
+                if (UpscalerVersion != _version && !(UpscalerVersion == FsrVersion.DLSS && Native.DlssName.Length == 0))
+                    o.Version.Value = UpscalerVersion;
                 if (!Mathf.Approximately(UpscalerSharpness, _sharpness)) o.Sharpness.Value = UpscalerSharpness;
                 if (UpscalerShowInfo != _showInfo) o.ShowInfo.Value = UpscalerShowInfo;
             }

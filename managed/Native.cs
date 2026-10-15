@@ -47,10 +47,11 @@ namespace ParalivesUpscaling
         internal static string LastError { get { return Text(1); } }
 
         // Versions this GPU/driver offers ("" until the runtime is up, or if not offered); cached once known.
-        private static string _fsr3, _fsr4, _xess;
+        private static string _fsr3, _fsr4, _xess, _dlss;
         internal static string Fsr3Name { get { return Offered(ref _fsr3, 2); } }
         internal static string Fsr4Name { get { return Offered(ref _fsr4, 3); } }
         internal static string XessName { get { return Offered(ref _xess, 4); } }
+        internal static string DlssName { get { return Offered(ref _dlss, 5); } }  // "" = this GPU cannot run DLSS
 
         private static string Offered(ref string cache, int which)
         {

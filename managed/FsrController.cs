@@ -408,7 +408,7 @@ namespace ParalivesUpscaling
             else if (_presentingFsr)
             {
                 string name = Native.VersionName;
-                if (!name.StartsWith("XeSS", StringComparison.Ordinal)) name = "FSR " + name;
+                if (!name.StartsWith("XeSS", StringComparison.Ordinal) && !name.StartsWith("DLSS", StringComparison.Ordinal)) name = "FSR " + name;
                 text = name + " · " + Localization.Translate("ParalivesUpscaling_Mode_" + _activeMode) + " · " +
                        _inW + "x" + _inH + " → " + _outW + "x" + _outH;
             }
