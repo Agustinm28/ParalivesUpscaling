@@ -1,6 +1,7 @@
 # Paralives Upscaling (FSR / XeSS / DLSS)
 
-Native AMD FSR 3.1 / FSR 4, Intel XeSS and NVIDIA DLSS upscaling and anti-aliasing for **Paralives**, as a BepInEx mod.
+Native AMD FSR 3.1 / FSR 4, Intel XeSS and NVIDIA DLSS upscaling and anti-aliasing, plus FSR and XeSS frame
+generation, for **Paralives**, as a BepInEx mod.
 
 No OptiScaler, no DLL proxies: the mod drives the official AMD FidelityFX, Intel XeSS and NVIDIA DLSS SDKs directly on the
 game's own DirectX 12 device, and integrates with the game's render pipeline (Unity 6, URP) so the upscaler gets proper
@@ -13,6 +14,8 @@ depth and motion vectors.
 - **NVIDIA DLSS** on NVIDIA RTX cards (greyed out in the menu on other GPUs), with automatic fallback to FSR.
 - **Native AA** mode: FSR as anti-aliasing at full resolution, a sharper and more stable replacement for MSAA/SMAA.
 - Upscaling modes from Quality (1.5x) to Ultra Performance (3.0x).
+- **Frame generation** (AMD FSR or Intel XeSS, any DirectX 12 GPU): one generated frame between every two rendered
+  frames, for smoother motion.
 - Settings live in the game's own **Options > Video** menu and apply instantly, without restarting.
 - The UI is always drawn at full resolution.
 - The game's post-processing (bloom, vignette) runs *after* FSR, at full resolution, as AMD recommends.
@@ -82,15 +85,16 @@ since other mods may use it. If you no longer need it, you can also remove `-for
    | `ParalivesUpscaling.dll` (managed) | `BepInEx\plugins\ParalivesUpscaling\` |
    | `ParalivesUpscaling.dll` (native) | `Paralives_Data\Plugins\x86_64\` |
    | `amd_fidelityfx_loader_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
-   | `amd_fidelityfx_upscaler_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
-   | `libxess.dll` | `Paralives_Data\Plugins\x86_64\` |
+   | `amd_fidelityfx_upscaler_dx12.dll`, `amd_fidelityfx_framegeneration_dx12.dll` | `Paralives_Data\Plugins\x86_64\` |
+   | `libxess.dll`, `libxess_fg.dll`, `libxell.dll` | `Paralives_Data\Plugins\x86_64\` |
    | `nvngx_dlss.dll` | `Paralives_Data\Plugins\x86_64\` |
+   | `ParalivesUpscaling.Patcher.dll` | `BepInEx\patchers\ParalivesUpscaling\` |
 
 3. In Steam: Paralives > Properties > General > Launch Options: `-force-d3d12`.
 4. Start the game and pick a technology and a quality in **Options > Video**.
 
-To uninstall manually, delete those six files, the `BepInEx\plugins\ParalivesUpscaling` folder and, to reset the
-settings, `BepInEx\config\paralives.upscaling.cfg`.
+To uninstall manually, delete those files, the `BepInEx\plugins\ParalivesUpscaling` and
+`BepInEx\patchers\ParalivesUpscaling` folders and, to reset the settings, `BepInEx\config\paralives.upscaling.cfg`.
 
 ## Usage
 
@@ -100,7 +104,8 @@ In **Options > Video**:
 |---|---|
 | **Upscaling Technology** | Off, FSR 3, FSR 4, Intel XeSS, NVIDIA DLSS. The entries show the exact versions your driver offers (e.g. FSR 3.1.5, FSR 4.1.1, XeSS 2.0.2, DLSS 310.9.1). DLSS is greyed out (and cannot be picked) without an NVIDIA RTX card. FSR 4 falls back to FSR 3, XeSS and DLSS to FSR, if they cannot start. |
 | **Upscaling Quality** | Native AA, Quality, Balanced, Performance, Ultra Performance |
-| **FSR Sharpness** | 0 (off) to 1 (FSR only) |
+| **Frame Generation** | Off, AMD FSR, Intel XeSS. Needs an upscaling technology on (Native AA is fine). Switching between FSR and XeSS takes a game restart. |
+| **Upscaling Sharpness** | 0 (off) to 1. FSR and XeSS/DLSS keep separate values; XeSS and DLSS start at 0. |
 | **Show upscaler info on screen** | Shows at the top of the screen what is actually running, e.g. `XeSS 2.0.2 · Quality · 1707x960 → 2560x1440` (fallbacks included). |
 
 The same modes and render resolutions apply to XeSS and DLSS (DLAA for Native AA). Switching to XeSS the first time takes a moment while it compiles its shaders.
@@ -152,6 +157,9 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
   hardware yet. It uses the official DLSS SDK and the same inputs as FSR and XeSS; if something looks wrong with it,
   please report it with both logs.
 
+- **Frame generation**: the in-game FPS counter shows rendered frames, not displayed ones; it adds a little input
+  latency, and the UI is interpolated along with the scene.
+
 - **Walking characters with FSR 3 / XeSS**: the game's character shaders produce no per-object motion vectors, so FSR 3
   and XeSS can show slight flicker on characters while they walk. For FSR 3 the mod softens it with a reactive mask;
   FSR 4 handles it well.
@@ -173,6 +181,7 @@ The mod itself adds about 0.3 ms of CPU time per frame (it renders the world wit
 | `JitterCancellation` | `true` | Unity's motion vectors include the camera jitter; FSR removes it. |
 | `PresentFlipY` | `false` | Only if the 3D world shows upside down. |
 | `DebugView` | `false` | Shows FSR's debug view (motion vectors, masks) instead of the image, and logs depth/motion probes. |
+| `FrameGenerationSwapchain` | `true` | Frame generation needs its own swapchain, set up at game start. Set to `false` only if the game fails to start or an overlay misbehaves (frame generation is then unavailable). |
 | `PerfLog` | `false` | Every 2 s, logs FPS, frame time, URP render time, render resolution and every camera rendered. |
 
 ## Troubleshooting
@@ -227,9 +236,10 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 | Folder | Contents |
 |---|---|
 | `managed/` | BepInEx plugin (C#): cameras, render-graph passes, menu, Harmony patches |
+| `patcher/` | BepInEx preloader patcher: installs the frame generation swapchain hook before Unity creates its swapchain |
 | `native/` | Native D3D12 plugin (C++): FidelityFX calls, motion-vector repair pass |
 | `native/ffx/` | AMD FidelityFX SDK v2.3.0 headers and signed runtime DLLs |
-| `native/xess/` | Intel XeSS SDK 3.0.2 headers and signed runtime DLL (its super-resolution library reports version 2.0.2) |
+| `native/xess/` | Intel XeSS SDK 3.0.2 headers and signed runtime DLLs: XeSS (reports 2.0.2), XeSS FG and XeLL |
 | `native/dlss/` | NVIDIA DLSS SDK 310.9.1 headers, static NGX library and signed runtime DLL |
 | `native/Unity/` | Unity native plugin API headers |
 | `installer/` | End-user installer: `Install.bat` + `setup.ps1` (installs BepInEx if needed, installs / updates / removes the mod) |
@@ -240,10 +250,10 @@ not in `D:\SteamLibrary\steamapps\common\Paralives`, also change `GamePath` in `
 Paralives Upscaling's own code is released under the [MIT License](LICENSE). The third-party components it bundles keep
 their own licenses (in `licenses\` in the release zip):
 
-- AMD FidelityFX SDK (FSR 3.1 / FSR 4): © Advanced Micro Devices, MIT license. The `amd_fidelityfx_*.dll` files are
+- AMD FidelityFX SDK (FSR 3.1 / FSR 4, frame generation): © Advanced Micro Devices, MIT license. The `amd_fidelityfx_*.dll` files are
   AMD's signed binaries from SDK v2.3.0.
-- Intel XeSS SDK: © Intel Corporation, Intel Simplified Software License (`native/xess/LICENSE.txt`). `libxess.dll` is
-  Intel's signed binary from SDK 3.0.2.
+- Intel XeSS SDK: © Intel Corporation, Intel Simplified Software License (`native/xess/LICENSE.txt`). `libxess.dll`,
+  `libxess_fg.dll` and `libxell.dll` are Intel's signed binaries from SDK 3.0.2.
 - NVIDIA DLSS SDK: © NVIDIA Corporation, NVIDIA DLSS SDK license (`native/dlss/LICENSE.txt`). `nvngx_dlss.dll` is
   NVIDIA's signed binary from SDK 310.9.1.
 - Unity native plugin API headers: © Unity Technologies, Unity Companion License.
