@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>ParalivesUpscaling.Patcher</AssemblyName>
+    <LangVersion>9.0</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- BepInEx 5.4.23.5 reference assemblies, shared with the plugin -->
+    <Reference Include="BepInEx" HintPath="..\managed\lib\BepInEx.dll" Private="false" />
+    <Reference Include="Mono.Cecil" HintPath="..\managed\lib\Mono.Cecil.dll" Private="false" />
+  </ItemGroup>
+</Project>
