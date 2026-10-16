@@ -11,7 +11,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
-#include <dxgi.h>
+#include <dxgi1_6.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -21,10 +21,12 @@
 #include "ffx/api/include/ffx_api_types.h"
 #include "ffx/api/include/dx12/ffx_api_dx12.h"
 #include "ffx/upscalers/include/ffx_upscale.h"
+#include "ffx/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h"
 #include "xess/inc/xess_d3d12.h"
 #include "dlss/include/nvsdk_ngx_helpers_d3d.h"
 
 #pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "dlss/lib/nvsdk_ngx_s.lib")
@@ -670,12 +672,15 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId, void *data)
 // ---- device lifetime ----
 static bool LoadFfx()
 {
+    if (pCreate) return true;  // already loaded by the swapchain hook
     // Preload the upscaler by full path so the loader's plain LoadLibrary("amd_fidelityfx_upscaler_dx12.dll")
     // finds it even though Plugins\x86_64 is not on the DLL search path.
-    wchar_t up[MAX_PATH], ld[MAX_PATH];
+    wchar_t up[MAX_PATH], fg[MAX_PATH], ld[MAX_PATH];
     swprintf(up, MAX_PATH, L"%samd_fidelityfx_upscaler_dx12.dll", s_dir);
+    swprintf(fg, MAX_PATH, L"%samd_fidelityfx_framegeneration_dx12.dll", s_dir);
     swprintf(ld, MAX_PATH, L"%samd_fidelityfx_loader_dx12.dll", s_dir);
     if (!LoadLibraryW(up)) { Fail(-1, "amd_fidelityfx_upscaler_dx12.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
+    if (!LoadLibraryW(fg)) Log("amd_fidelityfx_framegeneration_dx12.dll not found (%lu); frame generation unavailable", GetLastError());
     HMODULE m = LoadLibraryW(ld);
     if (!m) { Fail(-1, "amd_fidelityfx_loader_dx12.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
     pCreate = (PfnFfxCreateContext)GetProcAddress(m, "ffxCreateContext");
@@ -686,12 +691,102 @@ static bool LoadFfx()
     return true;
 }
 
+// ---- swapchain interception (frame generation) ----
+// FSR frame generation presents through FFX's proxy swapchain. FFX can only "wrap" an existing swapchain by releasing
+// it and creating a new one, which fails while Unity holds references, so the BepInEx preloader patcher calls
+// PFSR_InstallSwapchainHook before Unity creates its swapchain and Unity gets the proxy from the start.
+// Phase 0: mode 1 only logs swapchain creation; mode 2 also substitutes the proxy (frame generation stays off).
+typedef HRESULT(STDMETHODCALLTYPE *PfnCreateSwapChain)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
+typedef HRESULT(STDMETHODCALLTYPE *PfnCreateSwapChainForHwnd)(IDXGIFactory2 *, IUnknown *, HWND, const DXGI_SWAP_CHAIN_DESC1 *,
+                                                             const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *, IDXGIOutput *, IDXGISwapChain1 **);
+static PfnCreateSwapChain oCreateSwapChain;
+static PfnCreateSwapChainForHwnd oCreateSwapChainForHwnd;
+static int s_scMode;
+static thread_local bool s_inFfxCreate;  // FFX creates the real swapchain through the same (hooked) factory
+static ffxContext s_fgSwapchain;
+static IDXGISwapChain *s_proxy;
+
+static void *PatchVtable(void *obj, int slot, void *fn)
+{
+    void **vt = *(void ***)obj;
+    DWORD old;
+    VirtualProtect(&vt[slot], sizeof(void *), PAGE_READWRITE, &old);
+    void *prev = vt[slot];
+    vt[slot] = fn;
+    VirtualProtect(&vt[slot], sizeof(void *), old, &old);
+    return prev;
+}
+
+static HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory *f, IUnknown *dev, DXGI_SWAP_CHAIN_DESC *d, IDXGISwapChain **sc)
+{
+    if (!s_inFfxCreate && d)
+        Log("CreateSwapChain: %ux%u format %d buffers %u swap effect %d flags 0x%x windowed %d (not intercepted)",
+            d->BufferDesc.Width, d->BufferDesc.Height, d->BufferDesc.Format, d->BufferCount, d->SwapEffect, d->Flags, d->Windowed);
+    return oCreateSwapChain(f, dev, d, sc);
+}
+
+static HRESULT STDMETHODCALLTYPE HookCreateSwapChainForHwnd(IDXGIFactory2 *f, IUnknown *dev, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1 *d,
+                                                            const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs, IDXGIOutput *out, IDXGISwapChain1 **sc)
+{
+    if (s_inFfxCreate || !d) return oCreateSwapChainForHwnd(f, dev, hwnd, d, fs, out, sc);
+    Log("CreateSwapChainForHwnd: %ux%u format %d buffers %u swap effect %d flags 0x%x scaling %d alpha %d windowed %d",
+        d->Width, d->Height, d->Format, d->BufferCount, d->SwapEffect, d->Flags, d->Scaling, d->AlphaMode, fs ? fs->Windowed : -1);
+
+    // ponytail: only the first swapchain gets the proxy; handle recreation if Unity ever makes a second one.
+    ID3D12CommandQueue *queue = nullptr;
+    if (s_scMode == 2 && !s_fgSwapchain && SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&queue))) && LoadFfx()) {
+        DXGI_SWAP_CHAIN_DESC1 desc = *d;
+        DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsDesc = fs ? *fs : DXGI_SWAP_CHAIN_FULLSCREEN_DESC{};
+        IDXGISwapChain4 *proxy = nullptr;
+        ffxCreateContextDescFrameGenerationSwapChainForHwndDX12 c = {};
+        c.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
+        c.swapchain = &proxy;
+        c.hwnd = hwnd;
+        c.desc = &desc;
+        c.fullscreenDesc = fs ? &fsDesc : nullptr;
+        c.dxgiFactory = f;
+        c.gameQueue = queue;
+        ffxCreateContextDescFrameGenerationSwapChainVersionDX12 v = {};
+        v.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
+        v.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+        c.header.pNext = &v.header;
+
+        s_inFfxCreate = true;
+        ffxReturnCode_t rc = pCreate(&s_fgSwapchain, &c.header, nullptr);
+        s_inFfxCreate = false;
+        queue->Release();
+        if (rc == FFX_API_RETURN_OK && proxy) {
+            s_proxy = proxy;
+            *sc = proxy;  // Unity owns this reference
+            Log("FSR frame generation swapchain in place (%p)", (void *)proxy);
+            return S_OK;
+        }
+        s_fgSwapchain = nullptr;
+        Log("FSR frame generation swapchain failed (%d); using the game's own swapchain", (int)rc);
+    } else if (queue) queue->Release();
+    return oCreateSwapChainForHwnd(f, dev, hwnd, d, fs, out, sc);
+}
+
+static void SetDir()
+{
+    if (s_dir[0]) return;
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&SetDir, &self);
+    GetModuleFileNameW(self, s_dir, MAX_PATH);
+    if (wchar_t *slash = wcsrchr(s_dir, L'\\')) slash[1] = 0;
+}
+
 static void InitDevice()
 {
     if (s_gfx->GetRenderer() != kUnityGfxRendererD3D12) { Fail(-1, "game is not running on D3D12 (add -force-d3d12)"); return; }
     s_d3d = s_ifs->Get<IUnityGraphicsD3D12v6>();
     if (!s_d3d) { Fail(-1, "IUnityGraphicsD3D12v6 not available"); return; }
     s_dev = s_d3d->GetDevice();
+    if (auto *v7 = s_ifs->Get<IUnityGraphicsD3D12v7>()) {
+        IDXGISwapChain *sc = v7->GetSwapChain();
+        Log("Unity swapchain %p%s, sync interval %u, present flags 0x%x", (void *)sc, sc && sc == s_proxy ? " (FSR frame generation proxy)" : "",
+            v7->GetSyncInterval(), v7->GetPresentFlags());
+    }
 
     for (int i = 0; i < kFrames; i++)
         if (FAILED(s_dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s_alloc[i])))) { Fail(-1, "CreateCommandAllocator failed"); return; }
@@ -747,10 +842,7 @@ static void UNITY_INTERFACE_API OnGfxEvent(UnityGfxDeviceEventType type)
 
 EXPORT void UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces *ifs)
 {
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&UnityPluginLoad, &self);
-    GetModuleFileNameW(self, s_dir, MAX_PATH);
-    if (wchar_t *slash = wcsrchr(s_dir, L'\\')) slash[1] = 0;
+    SetDir();
     Log("---- ParalivesUpscaling native loaded");
 
     s_ifs = ifs;
@@ -765,6 +857,21 @@ EXPORT void UNITY_INTERFACE_API UnityPluginUnload()
 }
 
 // ---- exports for C# ----
+// Called by the preloader patcher, before Unity creates its swapchain. mode: 1 log only, 2 FSR frame generation proxy.
+EXPORT int UNITY_INTERFACE_API PFSR_InstallSwapchainHook(int mode)
+{
+    SetDir();
+    if (oCreateSwapChainForHwnd) return 1;
+    IDXGIFactory2 *f = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&f)))) { Log("swapchain hook: CreateDXGIFactory1 failed"); return 0; }
+    s_scMode = mode;
+    // vtable slots: IDXGIFactory::CreateSwapChain = 10, IDXGIFactory2::CreateSwapChainForHwnd = 15 (shared by every factory)
+    oCreateSwapChain = (PfnCreateSwapChain)PatchVtable(f, 10, (void *)HookCreateSwapChain);
+    oCreateSwapChainForHwnd = (PfnCreateSwapChainForHwnd)PatchVtable(f, 15, (void *)HookCreateSwapChainForHwnd);
+    f->Release();
+    Log("---- swapchain hook installed (mode %d)", mode);
+    return 1;
+}
 EXPORT void *UNITY_INTERFACE_API PFSR_GetRenderEventFunc() { return (void *)OnRenderEvent; }
 EXPORT int UNITY_INTERFACE_API PFSR_GetStatus(int which) { return which >= 0 && which < StCount ? (int)s_status[which] : 0; }
 // which: 0 = active upscaler version name, 1 = last error, 2/3 = FSR 3/4 version offered, 4 = XeSS version,
