@@ -872,7 +872,7 @@ namespace ParalivesUpscaling
             f->Near = _main.nearClipPlane;
             f->Far = _main.farClipPlane;
             f->FovY = _main.fieldOfView * Mathf.Deg2Rad;
-            f->Sharpness = Mathf.Clamp01(O.Sharpness.Value);
+            f->Sharpness = Mathf.Clamp01(O.SharpnessFor(_activeVersion).Value);
             f->Version = (int)_activeVersion;
             f->Gen = _createGen;
             f->DispatchFlags = _activeDebug ? Native.DispatchDrawDebugView : 0;

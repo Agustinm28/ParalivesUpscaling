@@ -20,10 +20,9 @@ namespace ParalivesUpscaling
         {
             ["UpscalerVersion"] = new[] { "Upscaling Technology", "Tecnología de escalado", "Tecnologia de upscaling", "Technologie de mise à l'échelle", "Upscaling-Technologie", "Tecnologia di upscaling", "Technologia skalowania", "超分辨率技术" },
             ["Upscaler"] = new[] { "Upscaling Quality", "Calidad de escalado", "Qualidade do upscaling", "Qualité de mise à l'échelle", "Upscaling-Qualität", "Qualità upscaling", "Jakość skalowania", "超分辨率质量" },
-            ["UpscalerSharpness"] = new[] { "FSR Sharpness", "Nitidez de FSR", "Nitidez do FSR", "Netteté FSR", "FSR-Schärfe", "Nitidezza FSR", "Ostrość FSR", "FSR 锐化" },
+            ["UpscalerSharpness"] = new[] { "Upscaling Sharpness", "Nitidez del escalado", "Nitidez do upscaling", "Netteté de la mise à l'échelle", "Upscaling-Schärfe", "Nitidezza upscaling", "Ostrość skalowania", "超分辨率锐化" },
 
             ["FrameGeneration"] = new[] { "Frame Generation", "Generación de cuadros", "Geração de quadros", "Génération d'images", "Frame Generation", "Generazione di fotogrammi", "Generowanie klatek", "帧生成" },
-            ["FrameGen_Restart"] = new[] { "restart the game", "reinicia el juego", "reinicie o jogo", "redémarrez le jeu", "Spiel neu starten", "riavvia il gioco", "uruchom grę ponownie", "请重启游戏" },
             ["FrameGen_Unavailable"] = new[] { "unavailable, see the BepInEx log", "no disponible, ver el log de BepInEx", "indisponível, veja o log do BepInEx", "indisponible, voir le journal BepInEx", "nicht verfügbar, siehe BepInEx-Log", "non disponibile, vedi il log di BepInEx", "niedostępne, zobacz log BepInEx", "不可用，请查看 BepInEx 日志" },
             ["FrameGen_NeedsUpscaling"] = new[] { "needs an upscaling technology", "necesita una tecnología de escalado", "precisa de uma tecnologia de upscaling", "nécessite une technologie de mise à l'échelle", "benötigt eine Upscaling-Technologie", "richiede una tecnologia di upscaling", "wymaga technologii skalowania", "需要开启超分辨率技术" },
             ["Tip_FrameGeneration"] = new[]
@@ -96,9 +95,14 @@ namespace ParalivesUpscaling
             ["Dlss_RequiresRtx"] = new[] { "requires NVIDIA RTX", "requiere NVIDIA RTX", "requer NVIDIA RTX", "nécessite NVIDIA RTX", "erfordert NVIDIA RTX", "richiede NVIDIA RTX", "wymaga NVIDIA RTX", "需要 NVIDIA RTX" },
             ["Tip_UpscalerSharpness"] = new[]
             {
-                "Extra sharpening after FSR. 0 = off.", "Nitidez extra después de FSR. 0 = desactivada.", "Nitidez extra depois do FSR. 0 = desativada.",
-                "Accentuation supplémentaire après FSR. 0 = désactivée.", "Zusätzliche Schärfung nach FSR. 0 = aus.", "Nitidezza aggiuntiva dopo FSR. 0 = disattivata.",
-                "Dodatkowe wyostrzanie po FSR. 0 = wyłączone.", "FSR 之后的额外锐化。0 = 关闭。"
+                "Extra sharpening after upscaling. 0 = off. FSR and XeSS/DLSS keep separate values; XeSS and DLSS start at 0 because they already look sharp.",
+                "Nitidez extra después del escalado. 0 = desactivada. FSR y XeSS/DLSS guardan valores separados; XeSS y DLSS empiezan en 0 porque ya se ven nítidos.",
+                "Nitidez extra depois do upscaling. 0 = desativada. FSR e XeSS/DLSS guardam valores separados; XeSS e DLSS começam em 0 porque já ficam nítidos.",
+                "Accentuation supplémentaire après la mise à l'échelle. 0 = désactivée. FSR et XeSS/DLSS gardent des valeurs séparées ; XeSS et DLSS démarrent à 0 car ils sont déjà nets.",
+                "Zusätzliche Schärfung nach dem Upscaling. 0 = aus. FSR und XeSS/DLSS haben getrennte Werte; XeSS und DLSS starten bei 0, da sie schon scharf aussehen.",
+                "Nitidezza aggiuntiva dopo l'upscaling. 0 = disattivata. FSR e XeSS/DLSS hanno valori separati; XeSS e DLSS partono da 0 perché sono già nitidi.",
+                "Dodatkowe wyostrzanie po skalowaniu. 0 = wyłączone. FSR i XeSS/DLSS mają osobne wartości; XeSS i DLSS zaczynają od 0, bo już są ostre.",
+                "超分辨率之后的额外锐化。0 = 关闭。FSR 与 XeSS/DLSS 分别保存数值；XeSS 和 DLSS 默认是 0，因为它们本身已足够清晰。"
             },
             ["Tip_NeedsDx12"] = new[]
             {
@@ -140,14 +144,8 @@ namespace ParalivesUpscaling
             }
             // frame generation entries: the one not matching this session's swapchain asks for a restart
             if (sub == "FrameGen_Off") return Pick(Table["Version_Off"]);
-            if (sub == "FrameGen_FSR" || sub == "FrameGen_XeSS")
-            {
-                bool xess = sub == "FrameGen_XeSS";
-                string name = xess ? "Intel XeSS" : "AMD FSR";
-                var active = Native.FrameGenTech;
-                return active != FrameGenTech.Off && active != (xess ? FrameGenTech.XeSS : FrameGenTech.FSR)
-                    ? name + " (" + Pick(Table["FrameGen_Restart"]) + ")" : name;
-            }
+            if (sub == "FrameGen_FSR") return "AMD FSR";
+            if (sub == "FrameGen_XeSS") return "Intel XeSS";
 
             string[] texts;
             return Table.TryGetValue(sub, out texts) ? Pick(texts) : null;

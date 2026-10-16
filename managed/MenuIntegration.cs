@@ -47,6 +47,12 @@ namespace ParalivesUpscaling
         private FrameGenTech _frameGen;
         private bool _initialised;
 
+        private static void ShowRestartNotice()
+        {
+            try { UI.Get<UIPrompt>().ShowOk("", "UIPrompt_NeedToRestartGameToTakeEffect", null, 0); }
+            catch (System.Exception e) { Plugin.Log.LogWarning("Restart notice unavailable: " + e.Message); }
+        }
+
         /// <summary>Called every frame: menu edits go to the config, config changes go to the menu.</summary>
         internal void Sync()
         {
@@ -57,15 +63,19 @@ namespace ParalivesUpscaling
                 // DLSS is listed (greyed out) on every GPU; picking it without an RTX card just snaps back
                 if (UpscalerVersion != _version && !(UpscalerVersion == FsrVersion.DLSS && Native.DlssName.Length == 0))
                     o.Version.Value = UpscalerVersion;
-                if (!Mathf.Approximately(UpscalerSharpness, _sharpness)) o.Sharpness.Value = UpscalerSharpness;
+                if (!Mathf.Approximately(UpscalerSharpness, _sharpness)) o.SharpnessFor(o.Version.Value).Value = UpscalerSharpness;
                 if (UpscalerShowInfo != _showInfo) o.ShowInfo.Value = UpscalerShowInfo;
                 // without a swapchain (installed at game start) frame generation cannot run; switching it on snaps back
                 if (FrameGeneration != _frameGen && !(FrameGeneration != FrameGenTech.Off && Native.FrameGenState == 0))
+                {
                     o.FrameGeneration.Value = FrameGeneration;
+                    // the other technology's swapchain is only set up at game start: same notice as the game's own settings
+                    if (FrameGeneration != FrameGenTech.Off && FrameGeneration != Native.FrameGenTech) ShowRestartNotice();
+                }
             }
             Upscaler = _mode = o.Mode.Value;
             UpscalerVersion = _version = o.Version.Value;
-            UpscalerSharpness = _sharpness = o.Sharpness.Value;
+            UpscalerSharpness = _sharpness = o.SharpnessFor(o.Version.Value).Value;
             UpscalerShowInfo = _showInfo = o.ShowInfo.Value;
             FrameGeneration = _frameGen = o.FrameGeneration.Value;
             _initialised = true;

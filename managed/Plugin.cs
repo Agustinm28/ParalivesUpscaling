@@ -49,9 +49,15 @@ namespace ParalivesUpscaling
 
     internal sealed class Settings
     {
+        /// <summary>The menu's single sharpness slider: FSR and XeSS/DLSS keep their own value.</summary>
+        internal ConfigEntry<float> SharpnessFor(FsrVersion v)
+        {
+            return v == FsrVersion.XeSS || v == FsrVersion.DLSS ? SharpnessXessDlss : Sharpness;
+        }
+
         public readonly ConfigEntry<FsrMode> Mode;
         public readonly ConfigEntry<FsrVersion> Version;
-        public readonly ConfigEntry<float> Sharpness, CharacterReactive;
+        public readonly ConfigEntry<float> Sharpness, SharpnessXessDlss, CharacterReactive;
         public readonly ConfigEntry<bool> FullResolutionAO, ShowInfo;
         public readonly ConfigEntry<float> JitterSignX, JitterSignY, MotionSignX, MotionSignY;
         public readonly ConfigEntry<bool> JitterCancellation, PresentFlipY, DebugView, PerfLog;
@@ -64,7 +70,9 @@ namespace ParalivesUpscaling
                 "Off, FSR3, FSR4, XeSS or DLSS. FSR4 needs a Radeon RX 9000 (or RX 7000 with recent drivers) and falls back to FSR 3 elsewhere. XeSS (best on Intel Arc, works on most DirectX 12 GPUs) and DLSS (NVIDIA RTX only) fall back to FSR if they cannot start.");
             Mode = c.Bind("General", "Mode", FsrMode.Quality,
                 "NativeAA (1.0x), Quality (1.5x), Balanced (1.7x), Performance (2.0x), UltraPerformance (3.0x).");
-            Sharpness = c.Bind("General", "Sharpness", 0.3f, "0 = off, 1 = maximum.");
+            Sharpness = c.Bind("General", "Sharpness", 0.3f, "Sharpening with FSR. 0 = off, 1 = maximum.");
+            SharpnessXessDlss = c.Bind("General", "SharpnessXessDlss", 0f,
+                "Sharpening with XeSS and DLSS (they already look sharp, so it starts off). 0 = off, 1 = maximum.");
             ShowInfo = c.Bind("General", "ShowInfo", false,
                 "Show which upscaler is actually running (FSR 3, FSR 4, XeSS or DLSS) and its resolutions at the top of the screen.");
             // Calibration knobs: Unity's projection / motion-vector conventions vs FSR's. Flip one if the image misbehaves.
