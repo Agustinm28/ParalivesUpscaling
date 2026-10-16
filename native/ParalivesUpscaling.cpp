@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <cmath>
 #include "Unity/IUnityGraphics.h"
 #include "Unity/IUnityGraphicsD3D12.h"
 #include "ffx/api/include/ffx_api.h"
@@ -316,6 +317,160 @@ static void WaitFence(UINT64 v)
     s_d3d->GetFrameFence()->SetEventOnCompletion(v, s_fenceEvent);
     // ponytail: bounded wait; a value from 3 frames ago is normally long done.
     if (WaitForSingleObject(s_fenceEvent, 2000) == WAIT_TIMEOUT) Log("warning: frame fence %llu wait timed out", v);
+}
+
+// ---- sharpening for XeSS and DLSS ----
+// FSR sharpens inside its own dispatch; XeSS has no sharpening and DLSS ignores its sharpness. For those two we run
+// RCAS (FidelityFX FSR's robust contrast-adaptive sharpening, MIT) on the upscaled image: copy it aside, then sharpen
+// back into it. The image is HDR, so samples go through a reversible tonemap around RCAS's [0, 1] math.
+static const char *kRcasHlsl = R"(
+Texture2D<float4> Src : register(t0);
+RWTexture2D<float4> Dst : register(u0);
+cbuffer C : register(b0) { float Con; uint W; uint H; uint Pad; };
+#define RCAS_LIMIT (0.25 - (1.0 / 16.0))
+float3 Tm(float3 c) { return c / (1.0 + max(max(c.r, c.g), c.b)); }
+float3 InvTm(float3 c) { return c / max(1.0 - max(max(c.r, c.g), c.b), 1e-4); }
+float3 Fetch(int2 p) { return Tm(max(Src.Load(int3(clamp(p, int2(0, 0), int2(W - 1, H - 1)), 0)).rgb, 0.0)); }
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= W || id.y >= H) return;
+    int2 p = int2(id.xy);
+    float4 centre = Src.Load(int3(p, 0));
+    float3 b = Fetch(p + int2(0, -1)), d = Fetch(p + int2(-1, 0)), f = Fetch(p + int2(1, 0)), h = Fetch(p + int2(0, 1));
+    float3 e = Tm(max(centre.rgb, 0.0));
+    float3 mn4 = min(min(b, d), min(f, h));
+    float3 mx4 = max(max(b, d), max(f, h));
+    float3 hitMin = min(mn4, e) / (4.0 * mx4 + 1e-5);
+    float3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0);
+    float3 lobe3 = max(-hitMin, hitMax);
+    float lobe = max(-RCAS_LIMIT, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * Con;
+    float3 c = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
+    Dst[p] = float4(InvTm(saturate(c)), centre.a);
+}
+)";
+static ID3D12RootSignature *s_rcasRootSig;
+static ID3D12PipelineState *s_rcasPso;
+static ID3D12DescriptorHeap *s_rcasHeap;  // kFrames * 2 (SRV, UAV), shader visible
+static ID3D12Resource *s_rcasSrc;         // copy of the upscaled image RCAS reads from
+
+static bool InitRcas()
+{
+    ID3DBlob *code = nullptr, *err = nullptr;
+    HRESULT hr = D3DCompile(kRcasHlsl, strlen(kRcasHlsl), "ParalivesUpscaling_Rcas", nullptr, nullptr, "main", "cs_5_1",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err);
+    if (FAILED(hr)) { Log("sharpening: compile failed: %s", err ? (const char *)err->GetBufferPointer() : "?"); if (err) err->Release(); return false; }
+
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; ranges[0].NumDescriptors = 1;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ranges[1].NumDescriptors = 1;
+    ranges[1].OffsetInDescriptorsFromTableStart = 1;
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.Num32BitValues = 4;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 2;
+    params[1].DescriptorTable.pDescriptorRanges = ranges;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 2; rs.pParameters = params;
+    ID3DBlob *rsBlob = nullptr;
+    hr = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &err);
+    if (SUCCEEDED(hr)) hr = s_dev->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&s_rcasRootSig));
+    if (rsBlob) rsBlob->Release();
+    if (err) { err->Release(); err = nullptr; }
+    if (FAILED(hr)) { code->Release(); Log("sharpening: root signature failed 0x%08X", (unsigned)hr); return false; }
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = s_rcasRootSig;
+    pso.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+    hr = s_dev->CreateComputePipelineState(&pso, IID_PPV_ARGS(&s_rcasPso));
+    code->Release();
+    if (FAILED(hr)) { Log("sharpening: PSO failed 0x%08X", (unsigned)hr); return false; }
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = kFrames * 2;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hr = s_dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&s_rcasHeap));
+    if (FAILED(hr)) { s_rcasPso->Release(); s_rcasPso = nullptr; Log("sharpening: descriptor heap failed 0x%08X", (unsigned)hr); return false; }
+    s_mvInc = s_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return true;
+}
+
+static void Transition(ID3D12Resource *r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
+{
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = r;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = from;
+    b.Transition.StateAfter = to;
+    s_list->ResourceBarrier(1, &b);
+}
+
+// Records RCAS on f->Output (UAV state before and after) into s_list.
+static void RecordRcas(const FrameData *f, int slot)
+{
+    D3D12_RESOURCE_DESC od = f->Output->GetDesc();
+    if (s_rcasSrc) {
+        D3D12_RESOURCE_DESC sd = s_rcasSrc->GetDesc();
+        if (sd.Width != od.Width || sd.Height != od.Height || sd.Format != od.Format) {
+            WaitFence(s_lastFence);  // the previous frames may still read it
+            s_rcasSrc->Release();
+            s_rcasSrc = nullptr;
+        }
+    }
+    if (!s_rcasSrc) {
+        D3D12_RESOURCE_DESC d = od;
+        d.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        if (FAILED(s_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                  nullptr, IID_PPV_ARGS(&s_rcasSrc)))) {
+            Log("sharpening: texture creation failed");
+            s_rcasSrc = nullptr;
+            return;
+        }
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = s_rcasHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = s_rcasHeap->GetGPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T)slot * 2 * s_mvInc;
+    gpu.ptr += (UINT64)slot * 2 * s_mvInc;
+    // Unity may create the texture typeless; views need the concrete format
+    DXGI_FORMAT vf = od.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? DXGI_FORMAT_R16G16B16A16_FLOAT : od.Format;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
+    sv.Format = vf;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    s_dev->CreateShaderResourceView(s_rcasSrc, &sv, cpu);
+    cpu.ptr += s_mvInc;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uv = {};
+    uv.Format = vf;
+    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    s_dev->CreateUnorderedAccessView(f->Output, nullptr, &uv, cpu);
+
+    Transition(f->Output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(s_rcasSrc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    s_list->CopyResource(s_rcasSrc, f->Output);
+    Transition(s_rcasSrc, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(f->Output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // same strength curve as FSR's own sharpness: 1 = full RCAS, 0 = two stops weaker (0 itself is skipped)
+    float con = exp2f(2.0f * f->Sharpness - 2.0f);
+    UINT consts[4] = { 0, (UINT)f->OutW, (UINT)f->OutH, 0 };
+    memcpy(&consts[0], &con, 4);
+    s_list->SetComputeRootSignature(s_rcasRootSig);
+    s_list->SetDescriptorHeaps(1, &s_rcasHeap);
+    s_list->SetPipelineState(s_rcasPso);
+    s_list->SetComputeRoot32BitConstants(0, 4, consts, 0);
+    s_list->SetComputeRootDescriptorTable(1, gpu);
+    s_list->Dispatch((UINT)(f->OutW + 7) / 8, (UINT)(f->OutH + 7) / 8, 1);
+    D3D12_RESOURCE_BARRIER u = {};
+    u.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    u.UAV.pResource = f->Output;
+    s_list->ResourceBarrier(1, &u);
 }
 
 static void DestroyNow(ffxContext &ctx, xess_context_handle_t &xctx, NVSDK_NGX_Handle *&dlss)
@@ -779,6 +934,7 @@ static void DoDispatch(const FrameData *f)
     } else {
         ok = DispatchFsr(f, fix, reactive, code);
     }
+    if (ok && !s_ctx && f->Sharpness > 0.0f && s_rcasPso) RecordRcas(f, i);  // XeSS / DLSS: our own sharpening
     if (ok && s_fgTech == 1) {
         if (f->FrameGen) PrepareFg(f, fix);
         else DestroyFg();
@@ -1148,6 +1304,7 @@ static void InitDevice()
     s_d3d->ConfigureEvent(EvDispatch, &cfg);
 
     if (!InitMotionFix()) Log("motion fix unavailable; FSR gets URP's depth texture and motion vectors as they are");
+    if (!InitRcas()) Log("sharpening for XeSS and DLSS unavailable");
     if (!LoadFfx()) return;
     PickVersion(0);  // log what this GPU/driver offers (and remember the FSR 3 / 4 names for the menu)
     if (LoadXess()) {
@@ -1173,6 +1330,10 @@ static void ShutdownDevice()
         s_ngxReady = false;
     }
     if (s_mvPso) { s_mvPso->Release(); s_mvPso = nullptr; }
+    if (s_rcasPso) { s_rcasPso->Release(); s_rcasPso = nullptr; }
+    if (s_rcasRootSig) { s_rcasRootSig->Release(); s_rcasRootSig = nullptr; }
+    if (s_rcasHeap) { s_rcasHeap->Release(); s_rcasHeap = nullptr; }
+    if (s_rcasSrc) { s_rcasSrc->Release(); s_rcasSrc = nullptr; }
     if (s_mvRootSig) { s_mvRootSig->Release(); s_mvRootSig = nullptr; }
     if (s_mvHeap) { s_mvHeap->Release(); s_mvHeap = nullptr; }
     if (s_list) { s_list->Release(); s_list = nullptr; }
