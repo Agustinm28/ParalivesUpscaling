@@ -21,8 +21,11 @@
 #include "ffx/api/include/ffx_api_types.h"
 #include "ffx/api/include/dx12/ffx_api_dx12.h"
 #include "ffx/upscalers/include/ffx_upscale.h"
+#include "ffx/framegeneration/include/ffx_framegeneration.h"
 #include "ffx/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h"
 #include "xess/inc/xess_d3d12.h"
+#include "xess/inc/xefg_swapchain_d3d12.h"
+#include "xess/inc/xell_d3d12.h"
 #include "dlss/include/nvsdk_ngx_helpers_d3d.h"
 
 #pragma comment(lib, "d3d12.lib")
@@ -55,10 +58,16 @@ struct FrameData {
     ID3D12Resource *Reactive;  // R8 reactive mask written by the repair pass (characters)
     float ReactiveStrength;    // applied with FSR 3.x only
     int Pad;
+    float CamPos[3], CamUp[3], CamRight[3], CamFwd[3];  // world space, for frame generation
+    int FrameGen, Pad2;        // FrameGen: 1 = frame generation on (with whichever proxy swapchain is in place)
+    float View[16], Proj[16];  // unjittered world-to-camera and GPU projection (Unity column-major), for XeSS FG
+    int FrameId, Pad3;         // Time.frameCount: XeLL frame ID and XeSS FG present ID
 };
-enum { EvCreate = 1, EvDispatch = 2, EvDestroy = 3 };
-enum { StState = 0, StDispatches, StDispatchesSinceCreate, StCreatedGen, StDispatchFailures, StCount };
+enum { EvCreate = 1, EvDispatch = 2, EvDestroy = 3, EvFrame = 4 };  // EvFrame data: the frame ID itself
+enum { StState = 0, StDispatches, StDispatchesSinceCreate, StCreatedGen, StDispatchFailures, StFrameGen, StFrameGenTech, StCount };
 // StState: 0 not ready, 1 FFX + D3D12 ready, 2 context ready, -1 fatal (no FFX/D3D12), -2 context creation failed
+// StFrameGen: 0 no proxy swapchain (frame generation impossible this session), 1 proxy ready, 2 frame generation running
+// StFrameGenTech: which proxy is in place, 0 none, 1 FSR, 2 XeSS (chosen at game start)
 
 static volatile LONG s_status[StCount];
 static char s_versionName[128], s_lastError[512];
@@ -97,7 +106,32 @@ static PfnFfxCreateContext pCreate;
 static PfnFfxDestroyContext pDestroy;
 static PfnFfxQuery pQuery;
 static PfnFfxDispatch pDispatch;
+static PfnFfxConfigure pConfigure;
 static ffxContext s_ctx;
+static int s_createFlags;  // upscaler creation flags of the current generation; frame generation shares two of them
+
+// frame generation: proxy swapchain (created by the swapchain hook) and the frame generation context on it
+static ffxContext s_fgSwapchain, s_fg;
+static IDXGISwapChain *s_proxy;
+static DXGI_FORMAT s_scFormat;
+static uint64_t s_fgFrame;
+static int s_fgW, s_fgH, s_fgFailedGen = -1;
+static int s_fgTech;  // StFrameGenTech
+
+// XeSS frame generation: Intel's proxy swapchain, which needs Intel's XeLL latency reduction fed with frame markers
+#define XEFG_FUNCS(X) X(xefgSwapChainD3D12CreateContext) X(xefgSwapChainSetLoggingCallback) X(xefgSwapChainSetLatencyReduction) \
+    X(xefgSwapChainD3D12InitFromSwapChainDesc) X(xefgSwapChainD3D12GetSwapChainPtr) X(xefgSwapChainSetEnabled) \
+    X(xefgSwapChainSetPresentId) X(xefgSwapChainD3D12TagFrameResource) X(xefgSwapChainTagFrameConstants) \
+    X(xefgSwapChainGetVersion) X(xefgSwapChainDestroy)
+#define XELL_FUNCS(X) X(xellD3D12CreateContext) X(xellDestroyContext) X(xellSetSleepMode) X(xellSleep) X(xellAddMarkerData) \
+    X(xellSetLoggingCallback) X(xellGetVersion)
+#define DECLARE_FN(fn) static decltype(&fn) p_##fn;
+XEFG_FUNCS(DECLARE_FN)
+XELL_FUNCS(DECLARE_FN)
+static xefg_swapchain_handle_t s_xefg;
+static xell_context_handle_t s_xell;
+static bool s_xefgOn;
+static volatile LONG s_presentId;  // frame ID of the frame Unity presents next (EvFrame)
 
 // ---- Intel XeSS (second backend; libxess.dll next to this DLL, loaded on first use) ----
 static const int kVersionXess = 10;
@@ -455,6 +489,153 @@ static bool CreateXess(const FrameData *f)
 }
 
 // Returns the version id whose display name starts with the wanted major version, or 0 (= default).
+// ---- FSR frame generation ----
+// Each frame: configure (frame ID, enabled) and "prepare" (depth + motion vectors, recorded into our command list);
+// on Present the proxy swapchain runs the interpolation through FgDispatch and presents both frames.
+static ffxReturnCode_t FgDispatch(ffxDispatchDescFrameGeneration *p, void *ctx) { return pDispatch((ffxContext *)ctx, &p->header); }
+
+static ffxReturnCode_t ConfigureFg(bool enabled)
+{
+    ffxConfigureDescFrameGeneration c = {};
+    c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    c.swapChain = s_proxy;
+    c.frameGenerationCallback = FgDispatch;
+    c.frameGenerationCallbackUserContext = &s_fg;
+    c.frameGenerationEnabled = enabled;
+    c.generationRect = { 0, 0, s_fgW, s_fgH };
+    c.frameID = s_fgFrame;
+    return pConfigure(&s_fg, &c.header);
+}
+
+static void DestroyFg()
+{
+    if (!s_fg) return;
+    ConfigureFg(false);
+    ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 w = {};
+    w.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
+    pDispatch(&s_fgSwapchain, &w.header);
+    WaitFence(s_lastFence);
+    pDestroy(&s_fg, nullptr);
+    s_fg = nullptr;
+    InterlockedExchange(&s_status[StFrameGen], 1);
+    Log("frame generation off");
+}
+
+static bool CreateFg(const FrameData *f)
+{
+    ffxCreateBackendDX12Desc backend = {};
+    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    backend.device = s_dev;
+    ffxCreateContextDescFrameGenerationVersion ver = {};
+    ver.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+    ver.version = FFX_FRAMEGENERATION_VERSION;
+    ffxCreateContextDescFrameGeneration d = {};
+    d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+    // same bit values as the upscaler's flags
+    d.flags = (uint32_t)s_createFlags & (FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION | FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED);
+    d.displaySize = { (uint32_t)f->OutW, (uint32_t)f->OutH };
+    d.maxRenderSize = { (uint32_t)f->RenderW, (uint32_t)f->RenderH };
+    d.backBufferFormat = ffxApiGetSurfaceFormatDX12(s_scFormat);
+    d.header.pNext = &backend.header;
+    backend.header.pNext = &ver.header;
+    ffxReturnCode_t r = pCreate(&s_fg, &d.header, nullptr);
+    if (r != FFX_API_RETURN_OK || !s_fg) { s_fg = nullptr; Log("frame generation context creation failed (%u)", r); return false; }
+    s_fgW = f->OutW;
+    s_fgH = f->OutH;
+    s_fgFrame = 0;
+    InterlockedExchange(&s_status[StFrameGen], 2);
+    Log("frame generation on: %dx%d -> %dx%d, flags 0x%X", f->RenderW, f->RenderH, f->OutW, f->OutH, d.flags);
+    return true;
+}
+
+// Records frame generation's prepare pass into s_list (depth and motion vectors are in a read state by now).
+static void PrepareFg(const FrameData *f, bool fix)
+{
+    if (!s_fg && (s_fgFailedGen == f->Gen || !CreateFg(f))) { s_fgFailedGen = f->Gen; return; }
+    s_fgFrame++;
+    ffxDispatchDescFrameGenerationPrepareV2 p = {};
+    p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+    p.frameID = s_fgFrame;
+    p.commandList = s_list;
+    p.renderSize = { (uint32_t)f->RenderW, (uint32_t)f->RenderH };
+    p.jitterOffset = { f->JitterX, f->JitterY };
+    p.motionVectorScale = { f->MvScaleX, f->MvScaleY };
+    p.frameTimeDelta = f->FrameTimeMs;
+    p.reset = f->Reset != 0;
+    p.cameraNear = f->Near;
+    p.cameraFar = f->Far;
+    p.cameraFovAngleVertical = f->FovY;
+    p.viewSpaceToMetersFactor = 1.0f;
+    p.depth = ffxApiGetResourceDX12(fix ? f->DepthAtt : f->Depth, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    p.motionVectors = ffxApiGetResourceDX12(fix ? f->MotionOut : f->Motion, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    memcpy(p.cameraPosition, f->CamPos, sizeof p.cameraPosition);
+    memcpy(p.cameraUp, f->CamUp, sizeof p.cameraUp);
+    memcpy(p.cameraRight, f->CamRight, sizeof p.cameraRight);
+    memcpy(p.cameraForward, f->CamFwd, sizeof p.cameraForward);
+
+    ffxReturnCode_t r = ConfigureFg(true);
+    if (r == FFX_API_RETURN_OK) r = pDispatch(&s_fg, &p.header);
+    if (r != FFX_API_RETURN_OK) {
+        Log("frame generation failed (%u); off until the next settings change", r);
+        s_fgFailedGen = f->Gen;
+        DestroyFg();
+    }
+}
+
+// ---- XeSS frame generation ----
+// Each frame: tag depth + motion vectors (valid until this frame's Present) and the camera constants under the frame
+// ID; the proxy interpolates when Unity presents (HookPresent sets the present ID).
+static void DisableXefg()
+{
+    if (!s_xefgOn) return;
+    p_xefgSwapChainSetEnabled(s_xefg, 0);
+    s_xefgOn = false;
+    InterlockedExchange(&s_status[StFrameGen], 1);
+    Log("frame generation off");
+}
+
+static void TagXefg(const FrameData *f, bool fix)
+{
+    if (!f->FrameGen || s_fgFailedGen == f->Gen) { DisableXefg(); return; }
+    uint32_t id = (uint32_t)f->FrameId;
+    xefg_swapchain_d3d12_resource_data_t r = {};
+    r.validity = XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT;
+    r.resourceSize = { (uint32_t)f->RenderW, (uint32_t)f->RenderH };
+    r.incomingState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    r.type = XEFG_SWAPCHAIN_RES_MOTION_VECTOR;
+    r.pResource = fix ? f->MotionOut : f->Motion;
+    xefg_swapchain_result_t e = p_xefgSwapChainD3D12TagFrameResource(s_xefg, s_list, id, &r);
+    r.type = XEFG_SWAPCHAIN_RES_DEPTH;
+    r.pResource = fix ? f->DepthAtt : f->Depth;
+    if (e >= 0) e = p_xefgSwapChainD3D12TagFrameResource(s_xefg, s_list, id, &r);
+
+    // Unity's column-major matrices read row by row are the transposed (row-vector, D3D-style) matrices XeSS FG expects
+    xefg_swapchain_frame_constant_data_t c = {};
+    memcpy(c.viewMatrix, f->View, sizeof c.viewMatrix);
+    memcpy(c.projectionMatrix, f->Proj, sizeof c.projectionMatrix);
+    c.jitterOffsetX = f->JitterX;
+    c.jitterOffsetY = f->JitterY;
+    c.motionVectorScaleX = f->MvScaleX;
+    c.motionVectorScaleY = f->MvScaleY;
+    c.resetHistory = f->Reset ? 1u : 0u;
+    c.frameRenderTime = f->FrameTimeMs;
+    if (e >= 0) e = p_xefgSwapChainTagFrameConstants(s_xefg, id, &c);
+
+    if (e >= 0 && !s_xefgOn) {
+        e = p_xefgSwapChainSetEnabled(s_xefg, 1);
+        if (e >= 0) {
+            s_xefgOn = true;
+            InterlockedExchange(&s_status[StFrameGen], 2);
+            Log("frame generation on: %dx%d -> %dx%d", f->RenderW, f->RenderH, f->OutW, f->OutH);
+        }
+    }
+    if (e < 0) {
+        Log("XeSS frame generation failed (%d); off until the next settings change", (int)e);
+        s_fgFailedGen = f->Gen;
+        DisableXefg();
+    }
+}
+
 static uint64_t PickVersion(int major)
 {
     uint64_t count = 0;
@@ -484,6 +665,8 @@ static uint64_t PickVersion(int major)
 static void DoCreate(const FrameData *f)
 {
     if (s_status[StState] < 1) return;
+    DestroyFg();  // sizes may change; recreated on the next dispatch
+    s_createFlags = f->CreateFlags;
     CollectRetired(false);
     RetireCurrent();
     InterlockedExchange(&s_status[StCreatedGen], f->Gen);
@@ -596,6 +779,10 @@ static void DoDispatch(const FrameData *f)
     } else {
         ok = DispatchFsr(f, fix, reactive, code);
     }
+    if (ok && s_fgTech == 1) {
+        if (f->FrameGen) PrepareFg(f, fix);
+        else DestroyFg();
+    } else if (ok && s_fgTech == 2) TagXefg(f, fix);
     s_list->Close();
     if (!ok) {
         LONG n = InterlockedIncrement(&s_status[StDispatchFailures]);
@@ -655,6 +842,8 @@ static bool DispatchFsr(const FrameData *f, bool fix, float reactive, unsigned &
 static void DoDestroy()
 {
     if (!pDestroy) return;
+    DestroyFg();
+    if (s_xefg) DisableXefg();
     RetireCurrent();
     LONG s = s_status[StState];
     if (s == 2 || s == -2) InterlockedExchange(&s_status[StState], 1);
@@ -666,6 +855,7 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventId, void *data)
         case EvCreate: DoCreate((const FrameData *)data); break;
         case EvDispatch: DoDispatch((const FrameData *)data); break;
         case EvDestroy: DoDestroy(); break;
+        case EvFrame: InterlockedExchange(&s_presentId, (LONG)(intptr_t)data); break;
     }
 }
 
@@ -687,24 +877,31 @@ static bool LoadFfx()
     pDestroy = (PfnFfxDestroyContext)GetProcAddress(m, "ffxDestroyContext");
     pQuery = (PfnFfxQuery)GetProcAddress(m, "ffxQuery");
     pDispatch = (PfnFfxDispatch)GetProcAddress(m, "ffxDispatch");
-    if (!pCreate || !pDestroy || !pQuery || !pDispatch) { Fail(-1, "FidelityFX loader is missing exports"); return false; }
+    pConfigure = (PfnFfxConfigure)GetProcAddress(m, "ffxConfigure");
+    if (!pCreate || !pDestroy || !pQuery || !pDispatch || !pConfigure) { Fail(-1, "FidelityFX loader is missing exports"); return false; }
     return true;
 }
 
 // ---- swapchain interception (frame generation) ----
-// FSR frame generation presents through FFX's proxy swapchain. FFX can only "wrap" an existing swapchain by releasing
-// it and creating a new one, which fails while Unity holds references, so the BepInEx preloader patcher calls
-// PFSR_InstallSwapchainHook before Unity creates its swapchain and Unity gets the proxy from the start.
-// Phase 0: mode 1 only logs swapchain creation; mode 2 also substitutes the proxy (frame generation stays off).
+// Frame generation presents through a proxy swapchain (FSR's or XeSS's). Both can only "wrap" an existing swapchain by
+// releasing it and creating a new one, which fails while Unity holds references, so the BepInEx preloader patcher
+// calls PFSR_InstallSwapchainHook before Unity creates its swapchain and Unity gets the proxy from the start. That is
+// also why the frame generation technology can only change with a restart.
+// mode 1 only logs swapchain creation (diagnostics); mode 2 substitutes FSR's proxy, mode 3 XeSS's. Both present
+// normally until frame generation is switched on.
 typedef HRESULT(STDMETHODCALLTYPE *PfnCreateSwapChain)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
 typedef HRESULT(STDMETHODCALLTYPE *PfnCreateSwapChainForHwnd)(IDXGIFactory2 *, IUnknown *, HWND, const DXGI_SWAP_CHAIN_DESC1 *,
                                                              const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *, IDXGIOutput *, IDXGISwapChain1 **);
+typedef HRESULT(STDMETHODCALLTYPE *PfnPresent)(IDXGISwapChain *, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE *PfnPresent1)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *);
 static PfnCreateSwapChain oCreateSwapChain;
 static PfnCreateSwapChainForHwnd oCreateSwapChainForHwnd;
+static PfnPresent oPresent;
+static PfnPresent1 oPresent1;
 static int s_scMode;
-static thread_local bool s_inFfxCreate;  // FFX creates the real swapchain through the same (hooked) factory
-static ffxContext s_fgSwapchain;
-static IDXGISwapChain *s_proxy;
+static thread_local bool s_inProxyCreate;  // the proxies create the real swapchain through the same (hooked) factory
+static thread_local int s_inPresent;       // Present1 may call Present inside the proxy
+static uint32_t s_lastMarkedPresent = 0xFFFFFFFFu;
 
 static void *PatchVtable(void *obj, int slot, void *fn)
 {
@@ -719,51 +916,200 @@ static void *PatchVtable(void *obj, int slot, void *fn)
 
 static HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory *f, IUnknown *dev, DXGI_SWAP_CHAIN_DESC *d, IDXGISwapChain **sc)
 {
-    if (!s_inFfxCreate && d)
+    if (!s_inProxyCreate && d)
         Log("CreateSwapChain: %ux%u format %d buffers %u swap effect %d flags 0x%x windowed %d (not intercepted)",
             d->BufferDesc.Width, d->BufferDesc.Height, d->BufferDesc.Format, d->BufferCount, d->SwapEffect, d->Flags, d->Windowed);
     return oCreateSwapChain(f, dev, d, sc);
 }
 
+// XeSS FG proxy: XeLL's present markers and XeSS FG's present ID around Unity's Present (render thread). A frame
+// without EvFrame (nothing rendered) keeps the previous ID and gets no second set of markers.
+static bool BeginPresent(UINT flags, uint32_t &id)
+{
+    if (s_inPresent++ || (flags & DXGI_PRESENT_TEST)) return false;
+    id = (uint32_t)s_presentId;
+    if (id == s_lastMarkedPresent) return false;
+    s_lastMarkedPresent = id;
+    p_xellAddMarkerData(s_xell, id, XELL_PRESENT_START);
+    p_xefgSwapChainSetPresentId(s_xefg, id);
+    return true;
+}
+
+// Unity creates its swapchain with a frame-latency waitable object and waits on it before each frame. Through the
+// XeSS FG proxy that object stops being signalled before Unity's first present (the proxy's own pacing drains it), so
+// Unity hangs at start-up. Unity gets an always-signalled event instead: its own frame fence still bounds how far the
+// CPU runs ahead, and XeLL paces frames while frame generation runs.
+typedef HANDLE(STDMETHODCALLTYPE *PfnGetWaitable)(IDXGISwapChain2 *);
+static PfnGetWaitable oGetWaitable;
+static HANDLE s_waitable;
+
+static HANDLE STDMETHODCALLTYPE HookGetWaitable(IDXGISwapChain2 *sc)
+{
+    if (HANDLE original = oGetWaitable(sc)) CloseHandle(original);  // the caller owns the returned handle
+    if (!s_waitable) s_waitable = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    HANDLE ours = nullptr;
+    DuplicateHandle(GetCurrentProcess(), s_waitable, GetCurrentProcess(), &ours, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    return ours;
+}
+
+static void EndPresent(bool marked, uint32_t id)
+{
+    if (marked) p_xellAddMarkerData(s_xell, id, XELL_PRESENT_END);
+    s_inPresent--;
+}
+
+static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain *sc, UINT sync, UINT flags)
+{
+    uint32_t id = 0;
+    bool marked = BeginPresent(flags, id);
+    HRESULT hr = oPresent(sc, sync, flags);
+    EndPresent(marked, id);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1 *sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS *pp)
+{
+    uint32_t id = 0;
+    bool marked = BeginPresent(flags, id);
+    HRESULT hr = oPresent1(sc, sync, flags, pp);
+    EndPresent(marked, id);
+    return hr;
+}
+
+static IDXGISwapChain1 *CreateFfxProxy(IDXGIFactory2 *f, ID3D12CommandQueue *queue, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1 *d,
+                                       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs)
+{
+    if (!LoadFfx()) return nullptr;
+    DXGI_SWAP_CHAIN_DESC1 desc = *d;
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsDesc = fs ? *fs : DXGI_SWAP_CHAIN_FULLSCREEN_DESC{};
+    IDXGISwapChain4 *proxy = nullptr;
+    ffxCreateContextDescFrameGenerationSwapChainForHwndDX12 c = {};
+    c.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
+    c.swapchain = &proxy;
+    c.hwnd = hwnd;
+    c.desc = &desc;
+    c.fullscreenDesc = fs ? &fsDesc : nullptr;
+    c.dxgiFactory = f;
+    c.gameQueue = queue;
+    ffxCreateContextDescFrameGenerationSwapChainVersionDX12 v = {};
+    v.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
+    v.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+    c.header.pNext = &v.header;
+
+    s_inProxyCreate = true;
+    ffxReturnCode_t rc = pCreate(&s_fgSwapchain, &c.header, nullptr);
+    s_inProxyCreate = false;
+    if (rc == FFX_API_RETURN_OK && proxy) {
+        Log("FSR frame generation swapchain in place (%p)", (void *)proxy);
+        return proxy;
+    }
+    s_fgSwapchain = nullptr;
+    Log("FSR frame generation swapchain failed (%d); using the game's own swapchain", (int)rc);
+    return nullptr;
+}
+
+static void XefgLog(const char *msg, xefg_swapchain_logging_level_t level, void *)
+{
+    static const char *names[] = { "debug", "info", "warning", "error" };
+    Log("XeSS FG %s: %s", names[level & 3], msg);
+}
+
+static void XellLog(const char *msg, xell_logging_level_t level)
+{
+    static const char *names[] = { "debug", "info", "warning", "error" };
+    Log("XeLL %s: %s", names[level & 3], msg);
+}
+
+static bool LoadXefg()
+{
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"%slibxell.dll", s_dir);
+    HMODULE xell = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    swprintf(path, MAX_PATH, L"%slibxess_fg.dll", s_dir);
+    HMODULE xefg = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!xell || !xefg) { Log("XeSS FG: libxess_fg.dll or libxell.dll not found next to ParalivesUpscaling.dll (%lu)", GetLastError()); return false; }
+    bool ok = true;
+#define GET_XEFG(fn) ok &= (p_##fn = (decltype(p_##fn))GetProcAddress(xefg, #fn)) != nullptr;
+#define GET_XELL(fn) ok &= (p_##fn = (decltype(p_##fn))GetProcAddress(xell, #fn)) != nullptr;
+    XEFG_FUNCS(GET_XEFG)
+    XELL_FUNCS(GET_XELL)
+    if (!ok) Log("XeSS FG: libxess_fg.dll or libxell.dll is missing exports");
+    return ok;
+}
+
+static IDXGISwapChain1 *CreateXefgProxy(IDXGIFactory2 *f, ID3D12CommandQueue *queue, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1 *d,
+                                        const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs)
+{
+    ID3D12Device *dev = nullptr;
+    if (!LoadXefg() || FAILED(queue->GetDevice(IID_PPV_ARGS(&dev)))) return nullptr;
+    IDXGISwapChain1 *proxy = nullptr;
+    xefg_swapchain_result_t r = XEFG_SWAPCHAIN_RESULT_ERROR_UNKNOWN;
+    xell_result_t lr = p_xellD3D12CreateContext(dev, &s_xell);
+    if (lr == XELL_RESULT_SUCCESS && s_xell) {
+        p_xellSetLoggingCallback(s_xell, XELL_LOGGING_LEVEL_WARNING, XellLog);
+        // XeSS FG requires latency reduction on; on other vendors XeLL only acts while frame generation runs
+        xell_sleep_params_t sp = {};
+        sp.bLowLatencyMode = 1;
+        p_xellSetSleepMode(s_xell, &sp);
+        r = p_xefgSwapChainD3D12CreateContext(dev, &s_xefg);
+    }
+    if (r == XEFG_SWAPCHAIN_RESULT_SUCCESS) {
+        p_xefgSwapChainSetLoggingCallback(s_xefg, XEFG_SWAPCHAIN_LOGGING_LEVEL_WARNING, XefgLog, nullptr);
+        r = p_xefgSwapChainSetLatencyReduction(s_xefg, s_xell);
+    }
+    if (r == XEFG_SWAPCHAIN_RESULT_SUCCESS) {
+        xefg_swapchain_d3d12_init_params_t ip = {};
+        // Unity uses reversed-Z depth; URP builds its motion vectors with our jittered projection
+        ip.initFlags = XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH | XEFG_SWAPCHAIN_INIT_FLAG_JITTERED_MV;
+        ip.maxInterpolatedFrames = 1;
+        ip.uiMode = XEFG_SWAPCHAIN_UI_MODE_NONE;
+        s_inProxyCreate = true;
+        r = p_xefgSwapChainD3D12InitFromSwapChainDesc(s_xefg, hwnd, d, fs, queue, f, &ip);
+        s_inProxyCreate = false;
+    }
+    if (r == XEFG_SWAPCHAIN_RESULT_SUCCESS) r = p_xefgSwapChainD3D12GetSwapChainPtr(s_xefg, IID_PPV_ARGS(&proxy));
+    dev->Release();
+    if (r != XEFG_SWAPCHAIN_RESULT_SUCCESS || !proxy) {
+        Log("XeSS frame generation swapchain failed (XeLL %d, XeSS FG %d); using the game's own swapchain", (int)lr, (int)r);
+        if (proxy) proxy->Release();
+        if (s_xefg) { p_xefgSwapChainDestroy(s_xefg); s_xefg = nullptr; }
+        if (s_xell) { p_xellDestroyContext(s_xell); s_xell = nullptr; }
+        return nullptr;
+    }
+    oPresent = (PfnPresent)PatchVtable(proxy, 8, (void *)HookPresent);      // IDXGISwapChain::Present
+    oPresent1 = (PfnPresent1)PatchVtable(proxy, 22, (void *)HookPresent1);  // IDXGISwapChain1::Present1
+    oGetWaitable = (PfnGetWaitable)PatchVtable(proxy, 33, (void *)HookGetWaitable);  // IDXGISwapChain2::GetFrameLatencyWaitableObject
+    xefg_swapchain_version_t v = {};
+    xell_version_t lv = {};
+    p_xefgSwapChainGetVersion(&v);
+    p_xellGetVersion(&lv);
+    Log("XeSS frame generation swapchain in place (%p): XeSS FG %u.%u.%u, XeLL %u.%u.%u", (void *)proxy,
+        v.major, v.minor, v.patch, lv.major, lv.minor, lv.patch);
+    return proxy;
+}
+
 static HRESULT STDMETHODCALLTYPE HookCreateSwapChainForHwnd(IDXGIFactory2 *f, IUnknown *dev, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1 *d,
                                                             const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs, IDXGIOutput *out, IDXGISwapChain1 **sc)
 {
-    if (s_inFfxCreate || !d) return oCreateSwapChainForHwnd(f, dev, hwnd, d, fs, out, sc);
+    if (s_inProxyCreate || !d) return oCreateSwapChainForHwnd(f, dev, hwnd, d, fs, out, sc);
     Log("CreateSwapChainForHwnd: %ux%u format %d buffers %u swap effect %d flags 0x%x scaling %d alpha %d windowed %d",
         d->Width, d->Height, d->Format, d->BufferCount, d->SwapEffect, d->Flags, d->Scaling, d->AlphaMode, fs ? fs->Windowed : -1);
 
     // ponytail: only the first swapchain gets the proxy; handle recreation if Unity ever makes a second one.
     ID3D12CommandQueue *queue = nullptr;
-    if (s_scMode == 2 && !s_fgSwapchain && SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&queue))) && LoadFfx()) {
-        DXGI_SWAP_CHAIN_DESC1 desc = *d;
-        DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsDesc = fs ? *fs : DXGI_SWAP_CHAIN_FULLSCREEN_DESC{};
-        IDXGISwapChain4 *proxy = nullptr;
-        ffxCreateContextDescFrameGenerationSwapChainForHwndDX12 c = {};
-        c.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
-        c.swapchain = &proxy;
-        c.hwnd = hwnd;
-        c.desc = &desc;
-        c.fullscreenDesc = fs ? &fsDesc : nullptr;
-        c.dxgiFactory = f;
-        c.gameQueue = queue;
-        ffxCreateContextDescFrameGenerationSwapChainVersionDX12 v = {};
-        v.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
-        v.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
-        c.header.pNext = &v.header;
-
-        s_inFfxCreate = true;
-        ffxReturnCode_t rc = pCreate(&s_fgSwapchain, &c.header, nullptr);
-        s_inFfxCreate = false;
+    if ((s_scMode == 2 || s_scMode == 3) && !s_proxy && SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&queue)))) {
+        IDXGISwapChain1 *proxy = s_scMode == 3 ? CreateXefgProxy(f, queue, hwnd, d, fs) : CreateFfxProxy(f, queue, hwnd, d, fs);
         queue->Release();
-        if (rc == FFX_API_RETURN_OK && proxy) {
+        if (proxy) {
             s_proxy = proxy;
+            s_scFormat = d->Format;
+            s_fgTech = s_scMode == 3 ? 2 : 1;
+            InterlockedExchange(&s_status[StFrameGenTech], s_fgTech);
+            InterlockedExchange(&s_status[StFrameGen], 1);
             *sc = proxy;  // Unity owns this reference
-            Log("FSR frame generation swapchain in place (%p)", (void *)proxy);
             return S_OK;
         }
-        s_fgSwapchain = nullptr;
-        Log("FSR frame generation swapchain failed (%d); using the game's own swapchain", (int)rc);
-    } else if (queue) queue->Release();
+    }
     return oCreateSwapChainForHwnd(f, dev, hwnd, d, fs, out, sc);
 }
 
@@ -784,7 +1130,7 @@ static void InitDevice()
     s_dev = s_d3d->GetDevice();
     if (auto *v7 = s_ifs->Get<IUnityGraphicsD3D12v7>()) {
         IDXGISwapChain *sc = v7->GetSwapChain();
-        Log("Unity swapchain %p%s, sync interval %u, present flags 0x%x", (void *)sc, sc && sc == s_proxy ? " (FSR frame generation proxy)" : "",
+        Log("Unity swapchain %p%s, sync interval %u, present flags 0x%x", (void *)sc, sc && sc == s_proxy ? " (frame generation proxy)" : "",
             v7->GetSyncInterval(), v7->GetPresentFlags());
     }
 
@@ -817,6 +1163,7 @@ static void InitDevice()
 static void ShutdownDevice()
 {
     if (pDestroy) {
+        DestroyFg();
         RetireCurrent();
         CollectRetired(true);
     }
@@ -857,7 +1204,7 @@ EXPORT void UNITY_INTERFACE_API UnityPluginUnload()
 }
 
 // ---- exports for C# ----
-// Called by the preloader patcher, before Unity creates its swapchain. mode: 1 log only, 2 FSR frame generation proxy.
+// Called by the preloader patcher, before Unity creates its swapchain. mode: 1 log only, 2 FSR proxy, 3 XeSS proxy.
 EXPORT int UNITY_INTERFACE_API PFSR_InstallSwapchainHook(int mode)
 {
     SetDir();
@@ -872,6 +1219,15 @@ EXPORT int UNITY_INTERFACE_API PFSR_InstallSwapchainHook(int mode)
     Log("---- swapchain hook installed (mode %d)", mode);
     return 1;
 }
+// XeLL frame markers from the game's main thread (XeSS frame generation only). marker: -1 = xellSleep at the start of
+// the frame, otherwise an xell_latency_marker_type_t.
+EXPORT void UNITY_INTERFACE_API PFSR_XellMarker(int frameId, int marker)
+{
+    if (!s_xell) return;
+    if (marker < 0) p_xellSleep(s_xell, (uint32_t)frameId);
+    else p_xellAddMarkerData(s_xell, (uint32_t)frameId, (xell_latency_marker_type_t)marker);
+}
+
 EXPORT void *UNITY_INTERFACE_API PFSR_GetRenderEventFunc() { return (void *)OnRenderEvent; }
 EXPORT int UNITY_INTERFACE_API PFSR_GetStatus(int which) { return which >= 0 && which < StCount ? (int)s_status[which] : 0; }
 // which: 0 = active upscaler version name, 1 = last error, 2/3 = FSR 3/4 version offered, 4 = XeSS version,

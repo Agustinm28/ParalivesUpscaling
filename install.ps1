@@ -11,7 +11,7 @@ dotnet build "$root\patcher\ParalivesUpscaling.Patcher.csproj" -c Release -nolog
 if ($LASTEXITCODE) { throw "patcher build failed" }
 
 $plugins = "$Game\Paralives_Data\Plugins\x86_64"
-Copy-Item "$root\native\out\ParalivesUpscaling.dll", "$root\native\out\amd_fidelityfx_loader_dx12.dll", "$root\native\out\amd_fidelityfx_upscaler_dx12.dll", "$root\native\out\amd_fidelityfx_framegeneration_dx12.dll", "$root\native\out\libxess.dll", "$root\native\out\nvngx_dlss.dll" $plugins
+Copy-Item "$root\native\out\ParalivesUpscaling.dll", "$root\native\out\amd_fidelityfx_loader_dx12.dll", "$root\native\out\amd_fidelityfx_upscaler_dx12.dll", "$root\native\out\amd_fidelityfx_framegeneration_dx12.dll", "$root\native\out\libxess.dll", "$root\native\out\libxess_fg.dll", "$root\native\out\libxell.dll","$root\native\out\nvngx_dlss.dll" $plugins
 New-Item -ItemType Directory -Force "$Game\BepInEx\plugins\ParalivesUpscaling" | Out-Null
 Copy-Item "$root\managed\bin\Release\ParalivesUpscaling.dll" "$Game\BepInEx\plugins\ParalivesUpscaling\"
 New-Item -ItemType Directory -Force "$Game\BepInEx\patchers\ParalivesUpscaling" | Out-Null
