@@ -25,14 +25,18 @@ namespace ParalivesUpscaling
         public IntPtr Reactive;
         public float ReactiveStrength;
         public int Pad;
+        public Vector3 CamPos, CamUp, CamRight, CamFwd;
+        public int FrameGen, Pad2;
+        public Matrix4x4 View, Proj;
+        public int FrameId, Pad3;
     }
 
     internal static class Native
     {
         private const string Dll = "ParalivesUpscaling";
 
-        internal const int EvCreate = 1, EvDispatch = 2, EvDestroy = 3;
-        internal const int StState = 0, StDispatches = 1, StDispatchesSinceCreate = 2, StCreatedGen = 3;
+        internal const int EvCreate = 1, EvDispatch = 2, EvDestroy = 3, EvFrame = 4;
+        internal const int StState = 0, StDispatches = 1, StDispatchesSinceCreate = 2, StCreatedGen = 3, StFrameGen = 5, StFrameGenTech = 6;
 
         // FfxApiCreateContextUpscaleFlags
         internal const int FlagHighDynamicRange = 1 << 0, FlagJitterCancellation = 1 << 2, FlagDepthInverted = 1 << 3, FlagDebugVisualization = 1 << 9;
@@ -44,6 +48,14 @@ namespace ParalivesUpscaling
         [DllImport(Dll)] private static extern int PFSR_GetText(int which, StringBuilder buf, int cap);
 
         internal static string VersionName { get { return Text(0); } }
+        // 0 = no frame generation swapchain this session (patcher missing or switched off), 1 = ready, 2 = running
+        internal static int FrameGenState { get { try { return PFSR_GetStatus(StFrameGen); } catch { return 0; } } }
+        // Proxy swapchain in place this session (fixed at game start)
+        internal static FrameGenTech FrameGenTech { get { try { return (FrameGenTech)PFSR_GetStatus(StFrameGenTech); } catch { return FrameGenTech.Off; } } }
+
+        // XeLL markers (xell_latency_marker_type_t); Sleep starts a frame
+        internal const int XellSleep = -1, XellSimulationStart = 0, XellSimulationEnd = 1, XellRenderSubmitStart = 2, XellRenderSubmitEnd = 3;
+        [DllImport(Dll)] internal static extern void PFSR_XellMarker(int frameId, int marker);
         internal static string LastError { get { return Text(1); } }
 
         // Versions this GPU/driver offers ("" until the runtime is up, or if not offered); cached once known.

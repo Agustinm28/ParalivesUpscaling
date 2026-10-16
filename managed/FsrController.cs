@@ -15,6 +15,7 @@ using System.Text;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.LowLevel;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
@@ -139,6 +140,7 @@ namespace ParalivesUpscaling
                 Plugin.Log.LogError("ParalivesUpscaling.dll could not be loaded (it belongs in Paralives_Data\\Plugins\\x86_64): " + e.Message);
                 enabled = false;
             }
+            if (EventFunc != IntPtr.Zero && Native.FrameGenTech == FrameGenTech.XeSS) InstallXellFrameStart();
             // picking something in the menu again retries after a failure
             O.Mode.SettingChanged += (s, e) => { _disabledByError = false; };
             O.Version.SettingChanged += (s, e) => { _disabledByError = false; };
@@ -273,6 +275,65 @@ namespace ParalivesUpscaling
         private void OnEndContext(ScriptableRenderContext ctx, List<Camera> cams)
         {
             if (O.PerfLog.Value && _renderWatch.IsRunning) { _renderWatch.Stop(); _renderMs += _renderWatch.Elapsed.TotalMilliseconds; }
+        }
+
+        // XeSS frame generation needs Intel XeLL fed with every marker on every frame, rendered or not (a missing present
+        // marker can stall xellSleep): sleep + simulation start at the very top of the player loop (before input), the
+        // frame ID to the render thread right after (it presents this frame under the same ID), simulation end + render
+        // submit start when PostLateUpdate begins and render submit end when it ends (rendering happens inside it);
+        // the present markers come from the native Present hook. Our own frame counter, since Time.frameCount only
+        // advances later in the loop.
+        private int _xellFrame;
+        private CommandBuffer _cbFrame;
+
+        private struct XellFrameStart { }
+        private struct XellSubmitStart { }
+        private struct XellSubmitEnd { }
+
+        private void InstallXellFrameStart()
+        {
+            _cbFrame = new CommandBuffer { name = "ParalivesUpscaling frame id" };
+            var loop = PlayerLoop.GetCurrentPlayerLoop();
+            var systems = new List<PlayerLoopSystem>(loop.subSystemList);
+            int post = systems.FindIndex(x => x.type == typeof(UnityEngine.PlayerLoop.PostLateUpdate));
+            if (post < 0) { Plugin.Log.LogError("XeSS frame generation: player loop has no PostLateUpdate; XeLL markers off."); return; }
+
+            var postLate = systems[post];
+            var inner = new List<PlayerLoopSystem>(postLate.subSystemList);
+            inner.Insert(0, new PlayerLoopSystem
+            {
+                type = typeof(XellSubmitStart),
+                updateDelegate = () =>
+                {
+                    if (_xellFrame == 0) return;  // installed mid-frame: frame 1 starts at the top of the next loop
+                    Native.PFSR_XellMarker(_xellFrame, Native.XellSimulationEnd);
+                    Native.PFSR_XellMarker(_xellFrame, Native.XellRenderSubmitStart);
+                }
+            });
+            inner.Add(new PlayerLoopSystem
+            {
+                type = typeof(XellSubmitEnd),
+                updateDelegate = () => { if (_xellFrame > 0) Native.PFSR_XellMarker(_xellFrame, Native.XellRenderSubmitEnd); }
+            });
+            postLate.subSystemList = inner.ToArray();
+            systems[post] = postLate;
+
+            systems.Insert(0, new PlayerLoopSystem
+            {
+                type = typeof(XellFrameStart),
+                updateDelegate = () =>
+                {
+                    _xellFrame++;
+                    Native.PFSR_XellMarker(_xellFrame, Native.XellSleep);
+                    Native.PFSR_XellMarker(_xellFrame, Native.XellSimulationStart);
+                    _cbFrame.Clear();
+                    _cbFrame.IssuePluginEventAndData(EventFunc, Native.EvFrame, (IntPtr)_xellFrame);
+                    Graphics.ExecuteCommandBuffer(_cbFrame);
+                }
+            });
+            loop.subSystemList = systems.ToArray();
+            PlayerLoop.SetPlayerLoop(loop);
+            Plugin.Log.LogInfo("XeSS frame generation swapchain active: XeLL frame markers on.");
         }
 
         private void CountCamera(Camera cam)
@@ -411,6 +472,7 @@ namespace ParalivesUpscaling
                 if (!name.StartsWith("XeSS", StringComparison.Ordinal) && !name.StartsWith("DLSS", StringComparison.Ordinal)) name = "FSR " + name;
                 text = name + " · " + Localization.Translate("ParalivesUpscaling_Mode_" + _activeMode) + " · " +
                        _inW + "x" + _inH + " → " + _outW + "x" + _outH;
+                if (Native.FrameGenState == 2) text += " · " + Native.FrameGenTech + " FG";
             }
             else if (_active) text = Localization.Translate("ParalivesUpscaling_Status_Starting");
             else text = Localization.Translate("ParalivesUpscaling_Status_Unavailable");
@@ -822,6 +884,16 @@ namespace ParalivesUpscaling
             f->PrevViewProj = Matrix4x4.identity;
             f->Reactive = _pReactive;
             f->ReactiveStrength = Mathf.Clamp01(O.CharacterReactive.Value);
+            Transform t = _main.transform;
+            f->CamPos = t.position;
+            f->CamUp = t.up;
+            f->CamRight = t.right;
+            f->CamFwd = t.forward;
+            // only the technology whose swapchain is in place can run; the other one waits for a restart
+            f->FrameGen = O.FrameGeneration.Value != FrameGenTech.Off && O.FrameGeneration.Value == Native.FrameGenTech ? 1 : 0;
+            f->View = _main.worldToCameraMatrix;
+            f->Proj = GL.GetGPUProjectionMatrix(_main.projectionMatrix, true);  // unjittered: only the render camera is jittered
+            f->FrameId = _xellFrame;
         }
 
         private FrameData* NextSlot()

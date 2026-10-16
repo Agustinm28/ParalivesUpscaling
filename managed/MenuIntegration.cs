@@ -26,6 +26,10 @@ namespace ParalivesUpscaling
         [Tooltip("ParalivesUpscaling_Tip_Upscaler")]
         public FsrMode Upscaler;
 
+        [TranslatedText("ParalivesUpscaling_FrameGen_")]
+        [Tooltip("ParalivesUpscaling_Tip_FrameGeneration")]
+        public FrameGenTech FrameGeneration;
+
         [Slider(0f, 1f)]
         [Round(2)]
         [Tooltip("ParalivesUpscaling_Tip_UpscalerSharpness")]
@@ -40,6 +44,7 @@ namespace ParalivesUpscaling
         private FsrVersion _version;
         private float _sharpness;
         private bool _showInfo;
+        private FrameGenTech _frameGen;
         private bool _initialised;
 
         /// <summary>Called every frame: menu edits go to the config, config changes go to the menu.</summary>
@@ -54,11 +59,15 @@ namespace ParalivesUpscaling
                     o.Version.Value = UpscalerVersion;
                 if (!Mathf.Approximately(UpscalerSharpness, _sharpness)) o.Sharpness.Value = UpscalerSharpness;
                 if (UpscalerShowInfo != _showInfo) o.ShowInfo.Value = UpscalerShowInfo;
+                // without a swapchain (installed at game start) frame generation cannot run; switching it on snaps back
+                if (FrameGeneration != _frameGen && !(FrameGeneration != FrameGenTech.Off && Native.FrameGenState == 0))
+                    o.FrameGeneration.Value = FrameGeneration;
             }
             Upscaler = _mode = o.Mode.Value;
             UpscalerVersion = _version = o.Version.Value;
             UpscalerSharpness = _sharpness = o.Sharpness.Value;
             UpscalerShowInfo = _showInfo = o.ShowInfo.Value;
+            FrameGeneration = _frameGen = o.FrameGeneration.Value;
             _initialised = true;
             FsrOptionsNeedsDx12.Instance.Show(this);
         }

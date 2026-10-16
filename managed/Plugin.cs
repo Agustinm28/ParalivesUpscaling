@@ -15,6 +15,10 @@ namespace ParalivesUpscaling
     // (both fall back to FSR if they cannot start) and FSR4 falls back to the newest FSR the driver offers.
     public enum FsrVersion { Off = 0, FSR3 = 3, FSR4 = 4, XeSS = 10, DLSS = 20 }
 
+    // Frame generation technology. Its proxy swapchain is set up at game start (BepInEx preloader patcher), so switching
+    // between FSR and XeSS takes a restart; FSR can be switched on and off live.
+    public enum FrameGenTech { Off, FSR, XeSS }
+
     [BepInPlugin(Id, "Paralives Upscaling", Version)]
     [BepInProcess("Paralives.exe")]
     public sealed class Plugin : BaseUnityPlugin
@@ -51,6 +55,8 @@ namespace ParalivesUpscaling
         public readonly ConfigEntry<bool> FullResolutionAO, ShowInfo;
         public readonly ConfigEntry<float> JitterSignX, JitterSignY, MotionSignX, MotionSignY;
         public readonly ConfigEntry<bool> JitterCancellation, PresentFlipY, DebugView, PerfLog;
+        public readonly ConfigEntry<FrameGenTech> FrameGeneration;
+        public readonly ConfigEntry<bool> FrameGenerationSwapchain;
 
         public Settings(ConfigFile c)
         {
@@ -75,6 +81,12 @@ namespace ParalivesUpscaling
                 "FSR 3 only: how much FSR trusts the current frame on characters (0-1). Higher = less trailing on walking characters, slightly less smoothing.");
             PerfLog = c.Bind("Advanced", "PerfLog", false,
                 "Every 2 s, log frame rate, CPU/GPU frame times, render resolution and every camera rendered. Troubleshooting only.");
+            FrameGeneration = c.Bind("General", "FrameGeneration", FrameGenTech.Off,
+                "Off, FSR or XeSS: a generated frame between every two rendered frames. Needs an upscaling technology (not Off). " +
+                "Switching between FSR and XeSS takes effect after restarting the game.");
+            FrameGenerationSwapchain = c.Bind("Advanced", "FrameGenerationSwapchain", true,
+                "Present through the frame generation swapchain, set up at game start (needed for frame generation, harmless while it is off). " +
+                "Set to false only if the game fails to start or an overlay misbehaves; frame generation is then unavailable.");
             DebugView = c.Bind("Advanced", "DebugView", false,
                 "Show FSR's debug view (motion vectors, masks, history) instead of the image. Troubleshooting only; may not be supported by FSR 4.");
         }

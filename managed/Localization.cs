@@ -22,6 +22,21 @@ namespace ParalivesUpscaling
             ["Upscaler"] = new[] { "Upscaling Quality", "Calidad de escalado", "Qualidade do upscaling", "Qualité de mise à l'échelle", "Upscaling-Qualität", "Qualità upscaling", "Jakość skalowania", "超分辨率质量" },
             ["UpscalerSharpness"] = new[] { "FSR Sharpness", "Nitidez de FSR", "Nitidez do FSR", "Netteté FSR", "FSR-Schärfe", "Nitidezza FSR", "Ostrość FSR", "FSR 锐化" },
 
+            ["FrameGeneration"] = new[] { "Frame Generation", "Generación de cuadros", "Geração de quadros", "Génération d'images", "Frame Generation", "Generazione di fotogrammi", "Generowanie klatek", "帧生成" },
+            ["FrameGen_Restart"] = new[] { "restart the game", "reinicia el juego", "reinicie o jogo", "redémarrez le jeu", "Spiel neu starten", "riavvia il gioco", "uruchom grę ponownie", "请重启游戏" },
+            ["FrameGen_Unavailable"] = new[] { "unavailable, see the BepInEx log", "no disponible, ver el log de BepInEx", "indisponível, veja o log do BepInEx", "indisponible, voir le journal BepInEx", "nicht verfügbar, siehe BepInEx-Log", "non disponibile, vedi il log di BepInEx", "niedostępne, zobacz log BepInEx", "不可用，请查看 BepInEx 日志" },
+            ["FrameGen_NeedsUpscaling"] = new[] { "needs an upscaling technology", "necesita una tecnología de escalado", "precisa de uma tecnologia de upscaling", "nécessite une technologie de mise à l'échelle", "benötigt eine Upscaling-Technologie", "richiede una tecnologia di upscaling", "wymaga technologii skalowania", "需要开启超分辨率技术" },
+            ["Tip_FrameGeneration"] = new[]
+            {
+                "Inserts a generated frame between every two rendered frames for smoother motion. Needs an upscaling technology switched on (Native AA is fine). Adds a little input latency. Switching between FSR and XeSS takes effect after restarting the game.",
+                "Inserta un cuadro generado entre cada dos cuadros renderizados para un movimiento más fluido. Necesita una tecnología de escalado activada (AA nativo sirve). Agrega un poco de latencia. El cambio entre FSR y XeSS se aplica al reiniciar el juego.",
+                "Insere um quadro gerado entre cada dois quadros renderizados para um movimento mais suave. Precisa de uma tecnologia de upscaling ativada (AA nativo serve). Adiciona um pouco de latência. A troca entre FSR e XeSS vale depois de reiniciar o jogo.",
+                "Insère une image générée entre deux images rendues pour un mouvement plus fluide. Nécessite une technologie de mise à l'échelle activée (l'AA natif suffit). Ajoute un peu de latence. Le passage entre FSR et XeSS prend effet au redémarrage du jeu.",
+                "Fügt zwischen je zwei gerenderten Bildern ein generiertes Bild ein, für flüssigere Bewegung. Benötigt eine aktive Upscaling-Technologie (Natives AA genügt). Erhöht die Eingabelatenz etwas. Ein Wechsel zwischen FSR und XeSS wirkt nach einem Neustart des Spiels.",
+                "Inserisce un fotogramma generato tra due fotogrammi renderizzati per un movimento più fluido. Richiede una tecnologia di upscaling attiva (l'AA nativo va bene). Aggiunge un po' di latenza. Il passaggio tra FSR e XeSS ha effetto dopo il riavvio del gioco.",
+                "Wstawia wygenerowaną klatkę między każde dwie renderowane klatki, dla płynniejszego ruchu. Wymaga włączonej technologii skalowania (natywny AA wystarczy). Dodaje nieco opóźnienia. Zmiana między FSR a XeSS działa po ponownym uruchomieniu gry.",
+                "在每两帧渲染画面之间插入一帧生成画面，使运动更流畅。需要开启一种超分辨率技术（原生抗锯齿即可）。会略微增加输入延迟。在 FSR 和 XeSS 之间切换需重启游戏后生效。"
+            },
             ["UpscalerShowInfo"] = new[] { "Show upscaler info on screen", "Mostrar info del escalado en pantalla", "Mostrar info do upscaling na tela", "Afficher les infos de mise à l'échelle", "Upscaling-Info auf dem Bildschirm", "Mostra info upscaling a schermo", "Pokaż informacje o skalowaniu", "在屏幕上显示超分辨率信息" },
             ["Tip_UpscalerShowInfo"] = new[]
             {
@@ -114,6 +129,24 @@ namespace ParalivesUpscaling
                     return offered.Length > 0 ? "NVIDIA DLSS " + offered : "<color=#8C8C8C>NVIDIA DLSS (" + Pick(Table["Dlss_RequiresRtx"]) + ")</color>";
                 if (sub == "Version_XeSS") return offered.Length > 0 ? "Intel XeSS " + offered : "Intel XeSS";
                 return offered.Length > 0 ? "FSR " + offered : (sub == "Version_FSR3" ? "FSR 3" : "FSR 4");
+            }
+
+            if (sub == "FrameGeneration")  // greyed out while it cannot run (MenuIntegration ignores switching it on without its swapchain)
+            {
+                string label = Pick(Table[sub]);
+                if (Native.FrameGenState == 0) return "<color=#8C8C8C>" + label + " (" + Pick(Table["FrameGen_Unavailable"]) + ")</color>";
+                if (Plugin.O.Version.Value == FsrVersion.Off) return "<color=#8C8C8C>" + label + " (" + Pick(Table["FrameGen_NeedsUpscaling"]) + ")</color>";
+                return label;
+            }
+            // frame generation entries: the one not matching this session's swapchain asks for a restart
+            if (sub == "FrameGen_Off") return Pick(Table["Version_Off"]);
+            if (sub == "FrameGen_FSR" || sub == "FrameGen_XeSS")
+            {
+                bool xess = sub == "FrameGen_XeSS";
+                string name = xess ? "Intel XeSS" : "AMD FSR";
+                var active = Native.FrameGenTech;
+                return active != FrameGenTech.Off && active != (xess ? FrameGenTech.XeSS : FrameGenTech.FSR)
+                    ? name + " (" + Pick(Table["FrameGen_Restart"]) + ")" : name;
             }
 
             string[] texts;
