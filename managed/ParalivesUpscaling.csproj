@@ -4,6 +4,7 @@
     <AssemblyName>ParalivesUpscaling</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>9.0</LangVersion>
+    <Version>1.1.0</Version>
     <GamePath>D:\SteamLibrary\steamapps\common\Paralives</GamePath>
     <Managed>$(GamePath)\Paralives_Data\Managed</Managed>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

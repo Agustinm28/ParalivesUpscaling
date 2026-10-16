@@ -24,7 +24,7 @@ namespace ParalivesUpscaling
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Id = "paralives.upscaling";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         internal static ManualLogSource Log;
         internal static Settings O;
