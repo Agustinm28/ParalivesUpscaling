@@ -11,6 +11,8 @@ $root = $PSScriptRoot
 if ($LASTEXITCODE) { throw "native build failed" }
 dotnet build "$root\managed\ParalivesUpscaling.csproj" -c Release -nologo -v q
 if ($LASTEXITCODE) { throw "managed build failed" }
+dotnet build "$root\patcher\ParalivesUpscaling.Patcher.csproj" -c Release -nologo -v q
+if ($LASTEXITCODE) { throw "patcher build failed" }
 
 $version = [regex]::Match((Get-Content "$root\managed\Plugin.cs" -Raw), 'Version = "([^"]+)"').Groups[1].Value
 $stage = "$root\dist\stage"
@@ -19,10 +21,14 @@ $stage = "$root\dist\stage"
 function Stage-Mod([string]$Dest, [string]$Docs) {
     $native = New-Item -ItemType Directory -Force "$Dest\Paralives_Data\Plugins\x86_64"
     $plugin = New-Item -ItemType Directory -Force "$Dest\BepInEx\plugins\ParalivesUpscaling"
-    foreach ($f in "ParalivesUpscaling.dll", "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll", "libxess.dll", "nvngx_dlss.dll") {
+    foreach ($f in "ParalivesUpscaling.dll", "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll", "amd_fidelityfx_framegeneration_dx12.dll",
+                   "libxess.dll", "libxess_fg.dll", "libxell.dll", "nvngx_dlss.dll") {
         Copy-Item "$root\native\out\$f" $native
     }
     Copy-Item "$root\managed\bin\Release\ParalivesUpscaling.dll" $plugin
+    # preloader patcher: sets up the frame generation swapchain before Unity creates its own
+    $patcher = New-Item -ItemType Directory -Force "$Dest\BepInEx\patchers\ParalivesUpscaling"
+    Copy-Item "$root\patcher\bin\Release\ParalivesUpscaling.Patcher.dll" $patcher
 
     $licenses = New-Item -ItemType Directory -Force "$Docs\licenses"
     Copy-Item "$root\README.md" $Docs

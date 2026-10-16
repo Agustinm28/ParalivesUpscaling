@@ -13,8 +13,10 @@ $BepInExSha256 = '82F9878551030F54657792C0740D9D51A09500EEAE1FBA21106B0C441E6732
 
 # everything the mod puts in the game (uninstall removes exactly this)
 $NativeFiles = 'ParalivesUpscaling.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll',
-               'libxess.dll', 'nvngx_dlss.dll', 'ParalivesUpscaling.log'
+               'amd_fidelityfx_framegeneration_dx12.dll', 'libxess.dll', 'libxess_fg.dll', 'libxell.dll', 'nvngx_dlss.dll',
+               'ParalivesUpscaling.log'
 $PluginDir = 'BepInEx\plugins\ParalivesUpscaling'
+$PatcherDir = 'BepInEx\patchers\ParalivesUpscaling'
 $CacheDir = 'BepInEx\cache\ParalivesUpscaling'
 $ConfigFile = 'BepInEx\config\paralives.upscaling.cfg'
 
@@ -132,7 +134,7 @@ function Install-Mod([string]$Root) {
     Say '  right-click Paralives > Properties > General > Launch Options, and add:  -force-d3d12' Yellow
     Say '  (-force-d3d12 has been copied to the clipboard: just paste it there)' Yellow
     Say ''
-    Say 'Then start the game and choose Options > Video > Upscaling Technology.'
+    Say 'Then start the game and choose Options > Video > Upscaling Technology (and Frame Generation, if you like).'
 }
 
 function Uninstall-Mod([string]$Root) {
@@ -141,7 +143,7 @@ function Uninstall-Mod([string]$Root) {
         $p = Join-Path $native $f
         if (Test-Path $p) { Remove-Item $p -Force }
     }
-    foreach ($d in $PluginDir, $CacheDir) {
+    foreach ($d in $PluginDir, $PatcherDir, $CacheDir) {
         $p = Join-Path $Root $d
         if (Test-Path $p) { Remove-Item $p -Recurse -Force }
     }
